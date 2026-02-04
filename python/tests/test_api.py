@@ -1,5 +1,5 @@
 """
-Tests for the fast_textrank Python API.
+Tests for the rapid_textrank Python API.
 """
 
 import pytest
@@ -8,17 +8,17 @@ import json
 
 def test_import():
     """Test that the module can be imported."""
-    import fast_textrank
+    import rapid_textrank
 
-    assert hasattr(fast_textrank, "__version__")
-    assert hasattr(fast_textrank, "BaseTextRank")
-    assert hasattr(fast_textrank, "PositionRank")
-    assert hasattr(fast_textrank, "BiasedTextRank")
+    assert hasattr(rapid_textrank, "__version__")
+    assert hasattr(rapid_textrank, "BaseTextRank")
+    assert hasattr(rapid_textrank, "PositionRank")
+    assert hasattr(rapid_textrank, "BiasedTextRank")
 
 
 def test_version():
     """Test version string is valid."""
-    from fast_textrank import __version__
+    from rapid_textrank import __version__
 
     assert isinstance(__version__, str)
     parts = __version__.split(".")
@@ -30,7 +30,7 @@ class TestBaseTextRank:
 
     def test_extract_keywords_basic(self):
         """Test basic keyword extraction."""
-        from fast_textrank import BaseTextRank
+        from rapid_textrank import BaseTextRank
 
         extractor = BaseTextRank(top_n=5)
         result = extractor.extract_keywords(
@@ -44,7 +44,7 @@ class TestBaseTextRank:
 
     def test_extract_keywords_ranking(self):
         """Test that phrases are properly ranked."""
-        from fast_textrank import BaseTextRank
+        from rapid_textrank import BaseTextRank
 
         extractor = BaseTextRank(top_n=10)
         result = extractor.extract_keywords(
@@ -59,7 +59,7 @@ class TestBaseTextRank:
 
     def test_empty_input(self):
         """Test handling of empty input."""
-        from fast_textrank import BaseTextRank
+        from rapid_textrank import BaseTextRank
 
         extractor = BaseTextRank()
         result = extractor.extract_keywords("")
@@ -68,7 +68,7 @@ class TestBaseTextRank:
 
     def test_top_n_limit(self):
         """Test that top_n limits results."""
-        from fast_textrank import BaseTextRank
+        from rapid_textrank import BaseTextRank
 
         extractor = BaseTextRank(top_n=3)
         result = extractor.extract_keywords(
@@ -80,7 +80,7 @@ class TestBaseTextRank:
 
     def test_phrase_attributes(self):
         """Test phrase object attributes."""
-        from fast_textrank import BaseTextRank
+        from rapid_textrank import BaseTextRank
 
         extractor = BaseTextRank(top_n=1)
         result = extractor.extract_keywords("Machine learning is fascinating.")
@@ -99,7 +99,7 @@ class TestPositionRank:
 
     def test_position_bias(self):
         """Test that early words are favored."""
-        from fast_textrank import PositionRank
+        from rapid_textrank import PositionRank
 
         extractor = PositionRank(top_n=10)
 
@@ -118,7 +118,7 @@ class TestBiasedTextRank:
 
     def test_focus_terms(self):
         """Test extraction with focus terms."""
-        from fast_textrank import BiasedTextRank
+        from rapid_textrank import BiasedTextRank
 
         extractor = BiasedTextRank(
             focus_terms=["neural"], bias_weight=10.0, top_n=10
@@ -134,7 +134,7 @@ class TestBiasedTextRank:
 
     def test_change_focus(self):
         """Test changing focus terms."""
-        from fast_textrank import BiasedTextRank
+        from rapid_textrank import BiasedTextRank
 
         extractor = BiasedTextRank(focus_terms=["machine"], top_n=10)
         result1 = extractor.extract_keywords("Machine learning and neural networks.")
@@ -152,14 +152,14 @@ class TestTextRankConfig:
 
     def test_default_config(self):
         """Test default configuration."""
-        from fast_textrank import TextRankConfig
+        from rapid_textrank import TextRankConfig
 
         config = TextRankConfig()
         assert config is not None
 
     def test_custom_config(self):
         """Test custom configuration."""
-        from fast_textrank import TextRankConfig, BaseTextRank
+        from rapid_textrank import TextRankConfig, BaseTextRank
 
         config = TextRankConfig(
             damping=0.9,
@@ -175,7 +175,7 @@ class TestTextRankConfig:
 
     def test_invalid_config(self):
         """Test that invalid config raises error."""
-        from fast_textrank import TextRankConfig
+        from rapid_textrank import TextRankConfig
         import pytest
 
         with pytest.raises(ValueError):
@@ -187,7 +187,7 @@ class TestJsonInterface:
 
     def test_extract_from_json(self):
         """Test JSON-based extraction."""
-        from fast_textrank import extract_from_json
+        from rapid_textrank import extract_from_json
 
         doc = {
             "tokens": [
@@ -224,7 +224,7 @@ class TestJsonInterface:
 
     def test_batch_from_json(self):
         """Test batch JSON extraction."""
-        from fast_textrank import extract_batch_from_json
+        from rapid_textrank import extract_batch_from_json
 
         docs = [
             {
@@ -269,7 +269,7 @@ class TestConvenienceFunction:
 
     def test_extract_keywords(self):
         """Test the convenience function."""
-        from fast_textrank import extract_keywords
+        from rapid_textrank import extract_keywords
 
         phrases = extract_keywords(
             "Machine learning is transforming industries.", top_n=5

@@ -1,4 +1,4 @@
-# fast_textrank
+# rapid_textrank
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
@@ -20,11 +20,11 @@ Extract keywords and key phrases from text 10-100x faster than pure Python imple
 ## Quick Start
 
 ```bash
-pip install fast_textrank
+pip install rapid_textrank
 ```
 
 ```python
-from fast_textrank import extract_keywords
+from rapid_textrank import extract_keywords
 
 text = """
 Machine learning is a subset of artificial intelligence that enables
@@ -92,7 +92,7 @@ Co-occurrence graph (window=2):
 Weights words by their position—earlier appearances score higher. Useful for documents where key information appears in titles, abstracts, or opening paragraphs.
 
 ```python
-from fast_textrank import PositionRank
+from rapid_textrank import PositionRank
 
 extractor = PositionRank(top_n=10)
 result = extractor.extract_keywords("""
@@ -110,7 +110,7 @@ The quantum computing field continues to evolve rapidly...
 Steers extraction toward specific topics using focus terms. The `bias_weight` parameter controls how strongly results favor the focus terms.
 
 ```python
-from fast_textrank import BiasedTextRank
+from rapid_textrank import BiasedTextRank
 
 extractor = BiasedTextRank(
     focus_terms=["security", "privacy"],
@@ -134,7 +134,7 @@ optimizations should not compromise security measures.
 The simplest way to extract keywords:
 
 ```python
-from fast_textrank import extract_keywords
+from rapid_textrank import extract_keywords
 
 phrases = extract_keywords(
     text,           # Input text
@@ -148,7 +148,7 @@ phrases = extract_keywords(
 For more control, use the extractor classes:
 
 ```python
-from fast_textrank import BaseTextRank, PositionRank, BiasedTextRank
+from rapid_textrank import BaseTextRank, PositionRank, BiasedTextRank
 
 # Standard TextRank
 extractor = BaseTextRank(top_n=10, language="en")
@@ -176,7 +176,7 @@ result = extractor.extract_keywords(text, focus_terms=["neural", "network"])
 Fine-tune the algorithm with `TextRankConfig`:
 
 ```python
-from fast_textrank import TextRankConfig, BaseTextRank
+from rapid_textrank import TextRankConfig, BaseTextRank
 
 config = TextRankConfig(
     damping=0.85,              # PageRank damping factor (0-1)
@@ -220,7 +220,7 @@ tuples = result.as_tuples()  # [(text, score), ...]
 For processing large documents or integrating with spaCy, use the JSON interface. This accepts pre-tokenized data to avoid re-tokenizing in Rust.
 
 ```python
-from fast_textrank import extract_from_json, extract_batch_from_json
+from rapid_textrank import extract_from_json, extract_batch_from_json
 import json
 
 # Single document
@@ -265,7 +265,7 @@ Stopword filtering is available for 18 languages:
 
 ## Performance
 
-fast_textrank achieves significant speedups through Rust's performance characteristics and careful algorithm implementation.
+rapid_textrank achieves significant speedups through Rust's performance characteristics and careful algorithm implementation.
 
 ### Benchmark Script
 
@@ -273,10 +273,10 @@ Run this script to compare performance on your hardware:
 
 ```python
 """
-Benchmark: fast_textrank vs pytextrank
+Benchmark: rapid_textrank vs pytextrank
 
 Prerequisites:
-    pip install fast_textrank pytextrank spacy
+    pip install rapid_textrank pytextrank spacy
     python -m spacy download en_core_web_sm
 """
 
@@ -344,9 +344,9 @@ TEXTS = {
 }
 
 
-def benchmark_fast_textrank(text: str, runs: int = 10) -> dict:
-    """Benchmark fast_textrank."""
-    from fast_textrank import BaseTextRank
+def benchmark_rapid_textrank(text: str, runs: int = 10) -> dict:
+    """Benchmark rapid_textrank."""
+    from rapid_textrank import BaseTextRank
 
     extractor = BaseTextRank(top_n=10, language="en")
 
@@ -407,9 +407,9 @@ def main():
         print(f"\n{size.upper()} TEXT (~{word_count} words)")
         print("-" * 50)
 
-        # Benchmark fast_textrank
-        rust_results = benchmark_fast_textrank(text)
-        print(f"fast_textrank:  {rust_results['mean']:>8.2f} ms (±{rust_results['std']:.2f})")
+        # Benchmark rapid_textrank
+        rust_results = benchmark_rapid_textrank(text)
+        print(f"rapid_textrank:  {rust_results['mean']:>8.2f} ms (±{rust_results['std']:.2f})")
 
         # Benchmark pytextrank
         try:
@@ -423,7 +423,7 @@ def main():
 
     print("\n" + "=" * 70)
     print("Note: pytextrank times include spaCy tokenization.")
-    print("For fair comparison with pre-tokenized input, use fast_textrank's JSON API.")
+    print("For fair comparison with pre-tokenized input, use rapid_textrank's JSON API.")
     print("=" * 70)
 
 
@@ -452,13 +452,15 @@ The performance advantage comes from several factors:
 ### From PyPI
 
 ```bash
-pip install fast_textrank
+pip install rapid_textrank
 ```
+
+Import name is `rapid_textrank`.
 
 ### With spaCy Support
 
 ```bash
-pip install fast_textrank[spacy]
+pip install rapid_textrank[spacy]
 ```
 
 ### From Source
@@ -466,8 +468,8 @@ pip install fast_textrank[spacy]
 Requirements: Rust 1.70+, Python 3.9+
 
 ```bash
-git clone https://github.com/textranker/fast_textrank
-cd fast_textrank
+git clone https://github.com/textranker/rapid_textrank
+cd rapid_textrank
 pip install maturin
 maturin develop --release
 ```
@@ -525,7 +527,7 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Citation
 
-If you use fast_textrank in research, please cite the original TextRank paper:
+If you use rapid_textrank in research, please cite the original TextRank paper:
 
 ```bibtex
 @inproceedings{mihalcea-tarau-2004-textrank,

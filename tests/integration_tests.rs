@@ -1,6 +1,6 @@
-//! Integration tests for fast_textrank
+//! Integration tests for rapid_textrank
 
-use fast_textrank::*;
+use rapid_textrank::*;
 
 /// Sample text for testing
 const SAMPLE_TEXT: &str = r#"

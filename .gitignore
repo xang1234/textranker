@@ -15,6 +15,7 @@ dist/
 build/
 .eggs/
 *.egg
+*.ipynb
 
 # Virtual environments
 .venv/

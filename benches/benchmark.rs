@@ -1,7 +1,7 @@
-//! Benchmarks for fast_textrank
+//! Benchmarks for rapid_textrank
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use fast_textrank::*;
+use rapid_textrank::*;
 
 /// Sample text for benchmarking
 const SAMPLE_TEXT: &str = r#"

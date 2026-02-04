@@ -1,4 +1,4 @@
-//! Error types for fast_textrank
+//! Error types for rapid_textrank
 //!
 //! This module defines the error types used throughout the library.
 //! All errors are designed to be informative and actionable.
@@ -8,7 +8,7 @@ use thiserror::Error;
 /// Result type alias for convenience
 pub type Result<T> = std::result::Result<T, TextRankError>;
 
-/// Main error type for fast_textrank
+/// Main error type for rapid_textrank
 #[derive(Error, Debug, Clone)]
 pub enum TextRankError {
     /// Input text is empty or contains no processable content

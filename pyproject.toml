@@ -3,7 +3,7 @@ requires = ["maturin>=1.4,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "fast_textrank"
+name = "rapid_textrank"
 version = "0.0.1"
 description = "High-performance TextRank implementation with Python bindings"
 readme = { file = "README.md", content-type = "text/markdown" }
@@ -33,9 +33,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/xang1234/fast-textrank"
-Repository = "https://github.com/xang1234/fast-textrank"
-Issues = "https://github.com/xang1234/fast-textrank/issues"
+Homepage = "https://github.com/xang1234/rapid-textrank"
+Repository = "https://github.com/xang1234/rapid-textrank"
+Issues = "https://github.com/xang1234/rapid-textrank/issues"
 
 [project.optional-dependencies]
 spacy = ["spacy>=3.0"]
@@ -44,7 +44,7 @@ dev = ["pytest>=7.0", "pytest-benchmark", "spacy>=3.0"]
 [tool.maturin]
 features = ["python"]
 python-source = "python"
-module-name = "fast_textrank._rust"
+module-name = "rapid_textrank._rust"
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]

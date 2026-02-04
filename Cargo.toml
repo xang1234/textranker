@@ -1,5 +1,5 @@
 [package]
-name = "fast_textrank"
+name = "rapid_textrank"
 version = "0.0.1"
 edition = "2021"
 authors = ["TextRanker Contributors"]
@@ -10,7 +10,7 @@ keywords = ["nlp", "textrank", "keyword-extraction", "summarization"]
 categories = ["text-processing", "science"]
 
 [lib]
-name = "fast_textrank"
+name = "rapid_textrank"
 crate-type = ["cdylib", "rlib"]
 
 [features]

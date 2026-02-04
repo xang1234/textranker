@@ -1,16 +1,16 @@
 """
-spaCy pipeline component for fast_textrank.
+spaCy pipeline component for rapid_textrank.
 
-This module provides a spaCy pipeline component that uses fast_textrank
+This module provides a spaCy pipeline component that uses rapid_textrank
 for keyword extraction. It can be used as a drop-in replacement for
 pytextrank with significantly better performance.
 
 Example:
     >>> import spacy
-    >>> from fast_textrank.spacy_component import RustTextRank
+    >>> from rapid_textrank.spacy_component import RustTextRank
     >>>
     >>> nlp = spacy.load("en_core_web_sm")
-    >>> nlp.add_pipe("fast_textrank")
+    >>> nlp.add_pipe("rapid_textrank")
     >>>
     >>> doc = nlp("Machine learning is a subset of artificial intelligence.")
     >>> for phrase in doc._.phrases[:5]:
@@ -30,7 +30,7 @@ except ImportError:
     Doc = None
     Language = None
 
-from fast_textrank._rust import extract_from_json
+from rapid_textrank._rust import extract_from_json
 
 
 class Phrase:
@@ -74,7 +74,7 @@ class RustTextRankResult:
 if SPACY_AVAILABLE:
 
     @Language.factory(
-        "fast_textrank",
+        "rapid_textrank",
         default_config={
             "damping": 0.85,
             "max_iterations": 100,
@@ -86,7 +86,7 @@ if SPACY_AVAILABLE:
             "score_aggregation": "sum",
         },
     )
-    def create_fast_textrank(
+    def create_rapid_textrank(
         nlp: Language,
         name: str,
         damping: float,
@@ -122,7 +122,7 @@ if SPACY_AVAILABLE:
         Example:
             >>> import spacy
             >>> nlp = spacy.load("en_core_web_sm")
-            >>> nlp.add_pipe("fast_textrank")
+            >>> nlp.add_pipe("rapid_textrank")
             >>> doc = nlp("Machine learning is transforming industries.")
             >>> for phrase in doc._.phrases:
             ...     print(phrase.text, phrase.score)
@@ -131,7 +131,7 @@ if SPACY_AVAILABLE:
         def __init__(
             self,
             nlp: Language,
-            name: str = "fast_textrank",
+            name: str = "rapid_textrank",
             damping: float = 0.85,
             max_iterations: int = 100,
             convergence_threshold: float = 1e-6,

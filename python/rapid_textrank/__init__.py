@@ -1,11 +1,11 @@
 """
-fast_textrank - High-performance TextRank implementation
+rapid_textrank - High-performance TextRank implementation
 
 A fast TextRank implementation in Rust with Python bindings,
 providing keyword extraction and text summarization.
 """
 
-from fast_textrank._rust import (
+from rapid_textrank._rust import (
     __version__,
     Phrase,
     TextRankResult,
@@ -43,7 +43,7 @@ def extract_keywords(text: str, top_n: int = 10, language: str = "en") -> list:
         List of Phrase objects with text, score, and rank
 
     Example:
-        >>> from fast_textrank import extract_keywords
+        >>> from rapid_textrank import extract_keywords
         >>> phrases = extract_keywords("Machine learning is a subset of AI.")
         >>> for phrase in phrases:
         ...     print(f"{phrase.text}: {phrase.score:.4f}")

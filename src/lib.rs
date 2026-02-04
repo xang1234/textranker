@@ -1,4 +1,4 @@
-//! # fast_textrank
+//! # rapid_textrank
 //!
 //! A high-performance TextRank implementation with Python bindings.
 //!

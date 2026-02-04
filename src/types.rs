@@ -1,4 +1,4 @@
-//! Core types for fast_textrank
+//! Core types for rapid_textrank
 //!
 //! This module defines the fundamental data structures used throughout the library,
 //! including string interning, tokens, phrases, and configuration.
