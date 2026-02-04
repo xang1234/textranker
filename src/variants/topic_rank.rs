@@ -162,15 +162,35 @@ impl TopicRank {
             }
         }
 
-        // Compute pairwise similarities and cluster
-        // Pre-filter: only compute Jaccard if sets share at least one stem
-        for i in 0..n {
-            for j in (i + 1)..n {
-                // Fast pre-filter: skip Jaccard for disjoint sets (sim would be 0)
-                if candidates[i].stems.iter().any(|s| candidates[j].stems.contains(s)) {
-                    let sim = jaccard_similarity(&candidates[i].stems, &candidates[j].stems);
+        // Build inverted index: stem -> candidate indices
+        // This lets us skip pairs that share no stems (Jaccard would be 0)
+        let mut stem_to_candidates: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
+        for (i, candidate) in candidates.iter().enumerate() {
+            for stem in &candidate.stems {
+                stem_to_candidates.entry(stem.as_str()).or_default().push(i);
+            }
+        }
+
+        // Only compare candidates that share at least one stem
+        let mut compared: FxHashSet<(usize, usize)> = FxHashSet::default();
+        for indices in stem_to_candidates.values() {
+            if indices.len() < 2 {
+                continue;
+            }
+            for idx_i in 0..indices.len() {
+                for idx_j in (idx_i + 1)..indices.len() {
+                    let i = indices[idx_i];
+                    let j = indices[idx_j];
+                    let pair = if i < j { (i, j) } else { (j, i) };
+
+                    // Skip if already compared
+                    if !compared.insert(pair) {
+                        continue;
+                    }
+
+                    let sim = jaccard_similarity(&candidates[pair.0].stems, &candidates[pair.1].stems);
                     if sim >= self.similarity_threshold {
-                        union(&mut parent, i, j);
+                        union(&mut parent, pair.0, pair.1);
                     }
                 }
             }
@@ -401,6 +421,99 @@ mod tests {
                 phrases.len() >= 1,
                 "Should produce meaningful rankings"
             );
+        }
+    }
+
+    #[test]
+    fn test_inverted_index_clustering() {
+        // Test that the inverted index approach correctly clusters candidates:
+        // - Disjoint stem sets should form separate clusters
+        // - Overlapping stem sets meeting threshold should merge
+        // - Overlapping stem sets below threshold should stay separate
+
+        use crate::types::ChunkSpan;
+
+        // Helper to create a candidate with given stems
+        fn make_candidate(stems: &[&str]) -> PhraseCandidate {
+            PhraseCandidate {
+                text: stems.join(" "),
+                lemma: stems.join(" "),
+                stems: stems.iter().map(|s| s.to_string()).collect(),
+                chunk: ChunkSpan {
+                    start_token: 0,
+                    end_token: 1,
+                    start_char: 0,
+                    end_char: 1,
+                    sentence_idx: 0,
+                },
+            }
+        }
+
+        let topic_rank = TopicRank::new().with_similarity_threshold(0.25);
+
+        // Test 1: Completely disjoint candidates stay in separate clusters
+        {
+            let candidates = vec![
+                make_candidate(&["a", "b"]),
+                make_candidate(&["c", "d"]),
+                make_candidate(&["e", "f"]),
+            ];
+            let clusters = topic_rank.cluster_phrases(&candidates);
+            assert_eq!(clusters.len(), 3, "Disjoint candidates should form 3 separate clusters");
+        }
+
+        // Test 2: Identical candidates merge into one cluster
+        {
+            let candidates = vec![
+                make_candidate(&["a", "b"]),
+                make_candidate(&["a", "b"]),
+            ];
+            let clusters = topic_rank.cluster_phrases(&candidates);
+            assert_eq!(clusters.len(), 1, "Identical candidates should merge into 1 cluster");
+        }
+
+        // Test 3: High overlap merges, low overlap stays separate
+        // Jaccard({a,b}, {a,b,c}) = 2/3 ≈ 0.67 > 0.25, should merge
+        // Jaccard({a,b,c,d,e,f}, {a}) = 1/6 ≈ 0.17 < 0.25, should NOT merge
+        {
+            let candidates = vec![
+                make_candidate(&["a", "b"]),        // idx 0
+                make_candidate(&["a", "b", "c"]),   // idx 1 - should merge with 0
+                make_candidate(&["x", "y", "z"]),   // idx 2 - disjoint
+            ];
+            let clusters = topic_rank.cluster_phrases(&candidates);
+            assert_eq!(clusters.len(), 2, "High-overlap pair should merge, disjoint should stay separate");
+
+            // Verify the merged cluster contains both overlapping candidates
+            let merged_cluster = clusters.iter().find(|c| c.len() == 2);
+            assert!(merged_cluster.is_some(), "Should have one cluster with 2 members");
+            let members = merged_cluster.unwrap();
+            assert!(members.contains(&0) && members.contains(&1), "Cluster should contain indices 0 and 1");
+        }
+
+        // Test 4: Transitive clustering (A overlaps B, B overlaps C -> all in same cluster)
+        {
+            let candidates = vec![
+                make_candidate(&["a", "b"]),        // idx 0
+                make_candidate(&["b", "c"]),        // idx 1 - overlaps with 0 via "b"
+                make_candidate(&["c", "d"]),        // idx 2 - overlaps with 1 via "c"
+            ];
+            // Jaccard({a,b}, {b,c}) = 1/3 ≈ 0.33 > 0.25
+            // Jaccard({b,c}, {c,d}) = 1/3 ≈ 0.33 > 0.25
+            let clusters = topic_rank.cluster_phrases(&candidates);
+            assert_eq!(clusters.len(), 1, "Transitive overlap should merge all into 1 cluster");
+            assert_eq!(clusters[0].len(), 3, "Cluster should contain all 3 candidates");
+        }
+
+        // Test 5: Single stem overlap below threshold stays separate
+        {
+            // Jaccard({a,b,c,d,e}, {a,x,y,z,w}) = 1/9 ≈ 0.11 < 0.25
+            let candidates = vec![
+                make_candidate(&["a", "b", "c", "d", "e"]),
+                make_candidate(&["a", "x", "y", "z", "w"]),
+            ];
+            let clusters = topic_rank.cluster_phrases(&candidates);
+            assert_eq!(clusters.len(), 2, "Low Jaccard overlap should stay separate despite shared stem");
         }
     }
 }
