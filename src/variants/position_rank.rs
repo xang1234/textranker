@@ -9,7 +9,7 @@
 use crate::graph::builder::GraphBuilder;
 use crate::graph::csr::CsrGraph;
 use crate::pagerank::personalized::{position_based_personalization, PersonalizedPageRank};
-use crate::phrase::extraction::PhraseExtractor;
+use crate::phrase::extraction::{ExtractionResult, PhraseExtractor};
 use crate::types::{Phrase, TextRankConfig, Token};
 use rustc_hash::FxHashMap;
 
@@ -40,15 +40,30 @@ impl PositionRank {
 
     /// Extract keyphrases using PositionRank
     pub fn extract(&self, tokens: &[Token]) -> Vec<Phrase> {
-        // Build graph
-        let builder = GraphBuilder::from_tokens(
+        self.extract_with_info(tokens).phrases
+    }
+
+    /// Extract keyphrases with PageRank convergence information
+    pub fn extract_with_info(&self, tokens: &[Token]) -> ExtractionResult {
+        // Build graph with POS filtering
+        let include_pos = if self.config.include_pos.is_empty() {
+            None
+        } else {
+            Some(self.config.include_pos.as_slice())
+        };
+        let builder = GraphBuilder::from_tokens_with_pos(
             tokens,
             self.config.window_size,
             self.config.use_edge_weights,
+            include_pos,
         );
 
         if builder.is_empty() {
-            return Vec::new();
+            return ExtractionResult {
+                phrases: Vec::new(),
+                converged: true,
+                iterations: 0,
+            };
         }
 
         let graph = CsrGraph::from_builder(&builder);
@@ -70,15 +85,31 @@ impl PositionRank {
 
         // Extract phrases
         let extractor = PhraseExtractor::with_config(self.config.clone());
-        extractor.extract(tokens, &graph, &pagerank)
+        let phrases = extractor.extract(tokens, &graph, &pagerank);
+
+        ExtractionResult {
+            phrases,
+            converged: pagerank.converged,
+            iterations: pagerank.iterations,
+        }
     }
 
     /// Get the first occurrence position for each lemma in the graph
     fn get_first_positions(&self, tokens: &[Token], graph: &CsrGraph) -> Vec<(u32, usize)> {
         let mut first_positions: FxHashMap<String, usize> = FxHashMap::default();
 
-        // Find first occurrence of each lemma
-        for token in tokens.iter().filter(|t| t.is_graph_candidate()) {
+        // Find first occurrence of each lemma (respecting include_pos config)
+        let include_pos = &self.config.include_pos;
+        for token in tokens.iter().filter(|t| {
+            if t.is_stopword {
+                return false;
+            }
+            if include_pos.is_empty() {
+                t.pos.is_content_word()
+            } else {
+                include_pos.contains(&t.pos)
+            }
+        }) {
             first_positions
                 .entry(token.lemma.clone())
                 .or_insert(token.token_idx);

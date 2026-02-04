@@ -5,7 +5,7 @@
 
 use crate::nlp::stopwords::StopwordFilter;
 use crate::nlp::tokenizer::Tokenizer;
-use crate::phrase::extraction::extract_keyphrases;
+use crate::phrase::extraction::extract_keyphrases_with_info;
 use crate::types::{Phrase, ScoreAggregation, TextRankConfig};
 use crate::variants::biased_textrank::BiasedTextRank;
 use crate::variants::position_rank::PositionRank;
@@ -115,8 +115,11 @@ impl PyTextRankConfig {
         min_phrase_length=1,
         max_phrase_length=4,
         score_aggregation="sum",
-        language="en"
+        language="en",
+        use_edge_weights=true,
+        include_pos=None
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         damping: f64,
         max_iterations: usize,
@@ -127,6 +130,8 @@ impl PyTextRankConfig {
         max_phrase_length: usize,
         score_aggregation: &str,
         language: &str,
+        use_edge_weights: bool,
+        include_pos: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let aggregation = match score_aggregation.to_lowercase().as_str() {
             "sum" => ScoreAggregation::Sum,
@@ -141,6 +146,19 @@ impl PyTextRankConfig {
             }
         };
 
+        // Parse include_pos from string tags
+        let pos_tags: Vec<crate::types::PosTag> = match include_pos {
+            Some(tags) => tags
+                .iter()
+                .map(|s| crate::types::PosTag::from_spacy(s))
+                .collect(),
+            None => vec![
+                crate::types::PosTag::Noun,
+                crate::types::PosTag::Adjective,
+                crate::types::PosTag::ProperNoun,
+            ],
+        };
+
         let config = TextRankConfig {
             damping,
             max_iterations,
@@ -151,12 +169,8 @@ impl PyTextRankConfig {
             max_phrase_length,
             score_aggregation: aggregation,
             language: language.to_string(),
-            use_edge_weights: true,
-            include_pos: vec![
-                crate::types::PosTag::Noun,
-                crate::types::PosTag::Adjective,
-                crate::types::PosTag::ProperNoun,
-            ],
+            use_edge_weights,
+            include_pos: pos_tags,
         };
 
         config
@@ -212,7 +226,7 @@ impl PyBaseTextRank {
     fn extract_keywords(&self, text: &str) -> PyResult<PyTextRankResult> {
         // Tokenize
         let tokenizer = Tokenizer::new();
-        let (sentences, mut tokens) = tokenizer.tokenize(text);
+        let (_sentences, mut tokens) = tokenizer.tokenize(text);
 
         // Apply stopword filter
         let stopwords = StopwordFilter::new(&self.config.language);
@@ -220,17 +234,13 @@ impl PyBaseTextRank {
             token.is_stopword = stopwords.is_stopword(&token.text);
         }
 
-        // Extract phrases
-        let phrases = extract_keyphrases(&tokens, &self.config);
-
-        // Check convergence (simplified - would need to return from extract_keyphrases)
-        let converged = true;
-        let iterations = self.config.max_iterations;
+        // Extract phrases with convergence info
+        let result = extract_keyphrases_with_info(&tokens, &self.config);
 
         Ok(PyTextRankResult {
-            phrases: phrases.into_iter().map(PyPhrase::from).collect(),
-            converged,
-            iterations,
+            phrases: result.phrases.into_iter().map(PyPhrase::from).collect(),
+            converged: result.converged,
+            iterations: result.iterations,
         })
     }
 
@@ -283,12 +293,12 @@ impl PyPositionRank {
         }
 
         let extractor = PositionRank::with_config(self.config.clone());
-        let phrases = extractor.extract(&tokens);
+        let result = extractor.extract_with_info(&tokens);
 
         Ok(PyTextRankResult {
-            phrases: phrases.into_iter().map(PyPhrase::from).collect(),
-            converged: true,
-            iterations: self.config.max_iterations,
+            phrases: result.phrases.into_iter().map(PyPhrase::from).collect(),
+            converged: result.converged,
+            iterations: result.iterations,
         })
     }
 
@@ -365,12 +375,12 @@ impl PyBiasedTextRank {
             .with_focus(&focus_refs)
             .with_bias_weight(self.bias_weight);
 
-        let phrases = extractor.extract(&tokens);
+        let result = extractor.extract_with_info(&tokens);
 
         Ok(PyTextRankResult {
-            phrases: phrases.into_iter().map(PyPhrase::from).collect(),
-            converged: true,
-            iterations: self.config.max_iterations,
+            phrases: result.phrases.into_iter().map(PyPhrase::from).collect(),
+            converged: result.converged,
+            iterations: result.iterations,
         })
     }
 

@@ -42,10 +42,10 @@ pub fn resolve_overlaps(mut chunks: Vec<ScoredChunk>) -> Vec<ScoredChunk> {
             last_end = chunk.chunk.end_char;
             result.push(chunk);
         } else if chunk.score > result.last().map(|c| c.score).unwrap_or(0.0) {
-            // This chunk overlaps but has higher score - replace
-            // But only if it completely subsumes or is subsumed by the previous
-            // For partial overlaps, we keep the first one (already added)
-            // This simple strategy works well in practice
+            // This chunk overlaps but has higher score - replace the lower-scoring one
+            result.pop();
+            last_end = chunk.chunk.end_char;
+            result.push(chunk);
         }
     }
 
@@ -148,13 +148,13 @@ mod tests {
     fn test_simple_overlap() {
         let chunks = vec![
             make_chunk(0, 15, 1.0, "first phrase"),
-            make_chunk(10, 25, 2.0, "overlapping phrase"), // Overlaps with first
+            make_chunk(10, 25, 2.0, "overlapping phrase"), // Overlaps with first, higher score
         ];
 
         let result = resolve_overlaps(chunks);
-        // First one is kept because it starts earlier
+        // Higher-scoring chunk replaces the lower-scoring one
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].text, "first phrase");
+        assert_eq!(result[0].text, "overlapping phrase");
     }
 
     #[test]
@@ -193,5 +193,34 @@ mod tests {
         assert!(result.len() >= 2);
         assert!(result.iter().any(|c| c.text == "c"));
         assert!(result.iter().any(|c| c.text == "d"));
+    }
+
+    #[test]
+    fn test_resolve_overlaps_higher_score_replaces() {
+        // Test that resolve_overlaps correctly replaces lower-score chunk with higher-score
+        let chunks = vec![
+            make_chunk(0, 15, 1.0, "lower score"),      // First chunk
+            make_chunk(10, 25, 3.0, "higher score"),    // Overlaps, higher score
+        ];
+
+        let result = resolve_overlaps(chunks);
+        // The higher-scoring chunk should replace the lower-scoring one
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].text, "higher score");
+        assert_eq!(result[0].score, 3.0);
+    }
+
+    #[test]
+    fn test_resolve_overlaps_lower_score_ignored() {
+        // Test that later chunk with lower score doesn't replace earlier chunk
+        let chunks = vec![
+            make_chunk(0, 15, 3.0, "higher score"),     // First chunk, high score
+            make_chunk(10, 25, 1.0, "lower score"),     // Overlaps, lower score
+        ];
+
+        let result = resolve_overlaps(chunks);
+        // The first (higher-scoring) chunk should be kept
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].text, "higher score");
     }
 }

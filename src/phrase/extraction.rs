@@ -176,13 +176,43 @@ impl PhraseExtractor {
     }
 }
 
+/// Result of keyphrase extraction including convergence info
+#[derive(Debug, Clone)]
+pub struct ExtractionResult {
+    /// Extracted phrases
+    pub phrases: Vec<Phrase>,
+    /// Whether PageRank converged
+    pub converged: bool,
+    /// Number of PageRank iterations
+    pub iterations: usize,
+}
+
 /// Extract phrases using the full TextRank pipeline
 pub fn extract_keyphrases(tokens: &[Token], config: &TextRankConfig) -> Vec<Phrase> {
-    // Build graph
-    let builder = GraphBuilder::from_tokens(tokens, config.window_size, config.use_edge_weights);
+    extract_keyphrases_with_info(tokens, config).phrases
+}
+
+/// Extract phrases with PageRank convergence information
+pub fn extract_keyphrases_with_info(tokens: &[Token], config: &TextRankConfig) -> ExtractionResult {
+    // Build graph with POS filtering
+    let include_pos = if config.include_pos.is_empty() {
+        None
+    } else {
+        Some(config.include_pos.as_slice())
+    };
+    let builder = GraphBuilder::from_tokens_with_pos(
+        tokens,
+        config.window_size,
+        config.use_edge_weights,
+        include_pos,
+    );
 
     if builder.is_empty() {
-        return Vec::new();
+        return ExtractionResult {
+            phrases: Vec::new(),
+            converged: true,
+            iterations: 0,
+        };
     }
 
     // Convert to CSR
@@ -197,7 +227,13 @@ pub fn extract_keyphrases(tokens: &[Token], config: &TextRankConfig) -> Vec<Phra
 
     // Extract phrases
     let extractor = PhraseExtractor::with_config(config.clone());
-    extractor.extract(tokens, &graph, &pagerank)
+    let phrases = extractor.extract(tokens, &graph, &pagerank);
+
+    ExtractionResult {
+        phrases,
+        converged: pagerank.converged,
+        iterations: pagerank.iterations,
+    }
 }
 
 #[cfg(test)]

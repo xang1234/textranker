@@ -10,7 +10,7 @@
 use crate::graph::builder::GraphBuilder;
 use crate::graph::csr::CsrGraph;
 use crate::pagerank::personalized::{focus_based_personalization, PersonalizedPageRank};
-use crate::phrase::extraction::PhraseExtractor;
+use crate::phrase::extraction::{ExtractionResult, PhraseExtractor};
 use crate::types::{Phrase, TextRankConfig, Token};
 
 /// BiasedTextRank implementation
@@ -69,15 +69,30 @@ impl BiasedTextRank {
 
     /// Extract keyphrases with current focus terms
     pub fn extract(&mut self, tokens: &[Token]) -> Vec<Phrase> {
-        // Build graph (cache it for re-ranking)
-        let builder = GraphBuilder::from_tokens(
+        self.extract_with_info(tokens).phrases
+    }
+
+    /// Extract keyphrases with PageRank convergence information
+    pub fn extract_with_info(&mut self, tokens: &[Token]) -> ExtractionResult {
+        // Build graph (cache it for re-ranking) with POS filtering
+        let include_pos = if self.config.include_pos.is_empty() {
+            None
+        } else {
+            Some(self.config.include_pos.as_slice())
+        };
+        let builder = GraphBuilder::from_tokens_with_pos(
             tokens,
             self.config.window_size,
             self.config.use_edge_weights,
+            include_pos,
         );
 
         if builder.is_empty() {
-            return Vec::new();
+            return ExtractionResult {
+                phrases: Vec::new(),
+                converged: true,
+                iterations: 0,
+            };
         }
 
         let graph = CsrGraph::from_builder(&builder);
@@ -107,7 +122,13 @@ impl BiasedTextRank {
 
         // Extract phrases
         let extractor = PhraseExtractor::with_config(self.config.clone());
-        extractor.extract(tokens, &graph, &pagerank)
+        let phrases = extractor.extract(tokens, &graph, &pagerank);
+
+        ExtractionResult {
+            phrases,
+            converged: pagerank.converged,
+            iterations: pagerank.iterations,
+        }
     }
 
     /// Change focus and re-rank without rebuilding the graph

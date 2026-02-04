@@ -67,6 +67,15 @@ pub struct JsonConfig {
     pub max_phrase_length: usize,
     #[serde(default)]
     pub score_aggregation: String,
+    #[serde(default = "default_use_edge_weights")]
+    pub use_edge_weights: bool,
+    /// POS tags to include (e.g., ["NOUN", "ADJ", "PROPN"])
+    #[serde(default)]
+    pub include_pos: Vec<String>,
+}
+
+fn default_use_edge_weights() -> bool {
+    true
 }
 
 fn default_damping() -> f64 {
@@ -100,6 +109,16 @@ impl From<JsonConfig> for TextRankConfig {
             _ => ScoreAggregation::Sum,
         };
 
+        // Parse include_pos from string tags
+        let include_pos: Vec<PosTag> = if jc.include_pos.is_empty() {
+            vec![PosTag::Noun, PosTag::Adjective, PosTag::ProperNoun]
+        } else {
+            jc.include_pos
+                .iter()
+                .map(|s| PosTag::from_spacy(s))
+                .collect()
+        };
+
         TextRankConfig {
             damping: jc.damping,
             max_iterations: jc.max_iterations,
@@ -110,8 +129,8 @@ impl From<JsonConfig> for TextRankConfig {
             max_phrase_length: jc.max_phrase_length,
             score_aggregation: aggregation,
             language: "en".to_string(),
-            use_edge_weights: true,
-            include_pos: vec![PosTag::Noun, PosTag::Adjective, PosTag::ProperNoun],
+            use_edge_weights: jc.use_edge_weights,
+            include_pos,
         }
     }
 }

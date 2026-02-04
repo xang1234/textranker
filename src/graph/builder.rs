@@ -3,7 +3,7 @@
 //! This module provides a mutable graph builder that uses FxHashMap
 //! for O(1) edge lookups during construction.
 
-use crate::types::Token;
+use crate::types::{PosTag, Token};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -73,7 +73,8 @@ impl GraphBuilder {
 
     /// Increment the edge weight between two nodes
     ///
-    /// If the edge doesn't exist, it's created with weight 1.0
+    /// If the edge doesn't exist, it's created with the given weight.
+    /// If it exists, the weight is added to the existing weight.
     pub fn increment_edge(&mut self, from: u32, to: u32, weight: f64) {
         if from == to {
             return; // No self-loops
@@ -88,16 +89,57 @@ impl GraphBuilder {
         }
     }
 
+    /// Set the edge weight between two nodes (binary/unweighted mode)
+    ///
+    /// If the edge doesn't exist, it's created with the given weight.
+    /// If it exists, the weight is NOT modified (edge already exists).
+    pub fn set_edge(&mut self, from: u32, to: u32, weight: f64) {
+        if from == to {
+            return; // No self-loops
+        }
+
+        // Add edge in both directions (undirected graph), but don't overwrite
+        if let Some(node) = self.nodes.get_mut(from as usize) {
+            node.edges.entry(to).or_insert(weight);
+        }
+        if let Some(node) = self.nodes.get_mut(to as usize) {
+            node.edges.entry(from).or_insert(weight);
+        }
+    }
+
     /// Build a graph from tokens using a sliding window
     ///
     /// This creates edges between tokens that co-occur within the window.
+    /// Uses the default POS filter (Noun, Verb, Adjective, ProperNoun).
     pub fn from_tokens(tokens: &[Token], window_size: usize, use_weights: bool) -> Self {
+        Self::from_tokens_with_pos(tokens, window_size, use_weights, None)
+    }
+
+    /// Build a graph from tokens using a sliding window with custom POS filter
+    ///
+    /// This creates edges between tokens that co-occur within the window.
+    /// If `include_pos` is None, uses the default content word filter.
+    /// If `include_pos` is Some, only includes tokens with matching POS tags.
+    pub fn from_tokens_with_pos(
+        tokens: &[Token],
+        window_size: usize,
+        use_weights: bool,
+        include_pos: Option<&[PosTag]>,
+    ) -> Self {
         let mut builder = Self::with_capacity(tokens.len() / 2);
 
-        // Filter to graph candidates (content words, non-stopwords)
+        // Filter to graph candidates based on POS tags
         let candidates: Vec<_> = tokens
             .iter()
-            .filter(|t| t.is_graph_candidate())
+            .filter(|t| {
+                if t.is_stopword {
+                    return false;
+                }
+                match include_pos {
+                    Some(pos_tags) => pos_tags.contains(&t.pos),
+                    None => t.pos.is_content_word(),
+                }
+            })
             .collect();
 
         // Process each sentence separately (don't create edges across sentences)
@@ -119,8 +161,13 @@ impl GraphBuilder {
                 // Window extends forward
                 for k in (j + 1)..std::cmp::min(j + window_size, sent_end) {
                     let node_k = builder.get_or_create_node(&candidates[k].lemma);
-                    let weight = if use_weights { 1.0 } else { 1.0 };
-                    builder.increment_edge(node_j, node_k, weight);
+                    if use_weights {
+                        // Weighted mode: accumulate co-occurrence counts
+                        builder.increment_edge(node_j, node_k, 1.0);
+                    } else {
+                        // Binary mode: edge exists (1.0) or doesn't, no accumulation
+                        builder.set_edge(node_j, node_k, 1.0);
+                    }
                 }
             }
         }
@@ -192,11 +239,24 @@ impl AtomicCounter {
 /// Build a graph from tokens in parallel (for large documents)
 ///
 /// This splits the document into chunks, builds partial graphs in parallel,
-/// and then merges them.
+/// and then merges them. Uses the default POS filter.
 pub fn build_graph_parallel(tokens: &[Token], window_size: usize, use_weights: bool) -> GraphBuilder {
+    build_graph_parallel_with_pos(tokens, window_size, use_weights, None)
+}
+
+/// Build a graph from tokens in parallel with custom POS filter
+///
+/// This splits the document into chunks, builds partial graphs in parallel,
+/// and then merges them.
+pub fn build_graph_parallel_with_pos(
+    tokens: &[Token],
+    window_size: usize,
+    use_weights: bool,
+    include_pos: Option<&[PosTag]>,
+) -> GraphBuilder {
     // For small documents, sequential is faster
     if tokens.len() < 1000 {
-        return GraphBuilder::from_tokens(tokens, window_size, use_weights);
+        return GraphBuilder::from_tokens_with_pos(tokens, window_size, use_weights, include_pos);
     }
 
     // Group tokens by sentence for parallel processing
@@ -204,7 +264,18 @@ pub fn build_graph_parallel(tokens: &[Token], window_size: usize, use_weights: b
     let mut current_sent = Vec::new();
     let mut current_idx = None;
 
-    for token in tokens.iter().filter(|t| t.is_graph_candidate()) {
+    // Filter tokens by POS tags
+    let token_filter = |t: &&Token| {
+        if t.is_stopword {
+            return false;
+        }
+        match include_pos {
+            Some(pos_tags) => pos_tags.contains(&t.pos),
+            None => t.pos.is_content_word(),
+        }
+    };
+
+    for token in tokens.iter().filter(token_filter) {
         if current_idx != Some(token.sentence_idx) {
             if !current_sent.is_empty() {
                 sentences.push(std::mem::take(&mut current_sent));
@@ -230,8 +301,13 @@ pub fn build_graph_parallel(tokens: &[Token], window_size: usize, use_weights: b
                         (sent_tokens[j].lemma.clone(), sent_tokens[i].lemma.clone())
                     };
                     if a != b {
-                        let weight = if use_weights { 1.0 } else { 1.0 };
-                        *edges.entry((a, b)).or_insert(0.0) += weight;
+                        if use_weights {
+                            // Weighted mode: accumulate co-occurrence counts
+                            *edges.entry((a, b)).or_insert(0.0) += 1.0;
+                        } else {
+                            // Binary mode: edge exists (1.0) or doesn't
+                            edges.entry((a, b)).or_insert(1.0);
+                        }
                     }
                 }
             }
@@ -344,5 +420,118 @@ mod tests {
         // No self-loop should be created
         let node = builder.get_node(id_a).unwrap();
         assert!(node.edges.is_empty());
+    }
+
+    #[test]
+    fn test_set_edge_no_accumulation() {
+        let mut builder = GraphBuilder::new();
+        let id_a = builder.get_or_create_node("machine");
+        let id_b = builder.get_or_create_node("learning");
+
+        // set_edge should not accumulate
+        builder.set_edge(id_a, id_b, 1.0);
+        builder.set_edge(id_a, id_b, 1.0);
+        builder.set_edge(id_a, id_b, 1.0);
+
+        // Should still have weight 1.0 (not 3.0)
+        assert_eq!(builder.get_node(id_a).unwrap().edges.get(&id_b), Some(&1.0));
+        assert_eq!(builder.get_node(id_b).unwrap().edges.get(&id_a), Some(&1.0));
+    }
+
+    #[test]
+    fn test_use_edge_weights_true_accumulates() {
+        // Create tokens where same pair co-occurs multiple times
+        let tokens = vec![
+            make_token("machine", "machine", 0, 0),
+            make_token("learning", "learning", 0, 1),
+            make_token("machine", "machine", 0, 2),
+            make_token("learning", "learning", 0, 3),
+        ];
+
+        let builder = GraphBuilder::from_tokens(&tokens, 2, true);
+
+        let machine_id = builder.get_node_id("machine").unwrap();
+        let learning_id = builder.get_node_id("learning").unwrap();
+
+        // With use_weights=true, edge weight should be > 1.0 due to accumulation
+        let weight = builder.get_node(machine_id).unwrap().edges.get(&learning_id);
+        assert!(weight.is_some());
+        assert!(*weight.unwrap() > 1.0, "Expected accumulated weight > 1.0");
+    }
+
+    #[test]
+    fn test_use_edge_weights_false_binary() {
+        // Create tokens where same pair co-occurs multiple times
+        let tokens = vec![
+            make_token("machine", "machine", 0, 0),
+            make_token("learning", "learning", 0, 1),
+            make_token("machine", "machine", 0, 2),
+            make_token("learning", "learning", 0, 3),
+        ];
+
+        let builder = GraphBuilder::from_tokens(&tokens, 2, false);
+
+        let machine_id = builder.get_node_id("machine").unwrap();
+        let learning_id = builder.get_node_id("learning").unwrap();
+
+        // With use_weights=false, edge weight should be exactly 1.0 (binary)
+        let weight = builder.get_node(machine_id).unwrap().edges.get(&learning_id);
+        assert!(weight.is_some());
+        assert_eq!(*weight.unwrap(), 1.0, "Expected binary weight = 1.0");
+    }
+
+    #[test]
+    fn test_include_pos_filters_by_tag() {
+        // Create tokens with different POS tags
+        let tokens = vec![
+            Token {
+                text: "machine".to_string(),
+                lemma: "machine".to_string(),
+                pos: PosTag::Noun,
+                start: 0,
+                end: 7,
+                sentence_idx: 0,
+                token_idx: 0,
+                is_stopword: false,
+            },
+            Token {
+                text: "runs".to_string(),
+                lemma: "run".to_string(),
+                pos: PosTag::Verb,
+                start: 8,
+                end: 12,
+                sentence_idx: 0,
+                token_idx: 1,
+                is_stopword: false,
+            },
+            Token {
+                text: "fast".to_string(),
+                lemma: "fast".to_string(),
+                pos: PosTag::Adverb,
+                start: 13,
+                end: 17,
+                sentence_idx: 0,
+                token_idx: 2,
+                is_stopword: false,
+            },
+        ];
+
+        // Only include Nouns - should only have "machine"
+        let builder_nouns = GraphBuilder::from_tokens_with_pos(&tokens, 3, true, Some(&[PosTag::Noun]));
+        assert_eq!(builder_nouns.node_count(), 1);
+        assert!(builder_nouns.get_node_id("machine").is_some());
+        assert!(builder_nouns.get_node_id("run").is_none());
+
+        // Only include Verbs - should only have "run"
+        let builder_verbs = GraphBuilder::from_tokens_with_pos(&tokens, 3, true, Some(&[PosTag::Verb]));
+        assert_eq!(builder_verbs.node_count(), 1);
+        assert!(builder_verbs.get_node_id("run").is_some());
+        assert!(builder_verbs.get_node_id("machine").is_none());
+
+        // Include Nouns and Verbs - should have both
+        let builder_both = GraphBuilder::from_tokens_with_pos(&tokens, 3, true, Some(&[PosTag::Noun, PosTag::Verb]));
+        assert_eq!(builder_both.node_count(), 2);
+        assert!(builder_both.get_node_id("machine").is_some());
+        assert!(builder_both.get_node_id("run").is_some());
     }
 }
