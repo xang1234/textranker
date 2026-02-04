@@ -7,7 +7,7 @@ use crate::graph::builder::GraphBuilder;
 use crate::graph::csr::CsrGraph;
 use crate::pagerank::standard::StandardPageRank;
 use crate::phrase::extraction::PhraseExtractor;
-use crate::types::{PosTag, ScoreAggregation, TextRankConfig, Token};
+use crate::types::{PhraseGrouping, PosTag, ScoreAggregation, TextRankConfig, Token};
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -69,8 +69,12 @@ pub struct JsonConfig {
     pub score_aggregation: String,
     #[serde(default = "default_language")]
     pub language: String,
+    #[serde(default)]
+    pub phrase_grouping: String,
     #[serde(default = "default_use_edge_weights")]
     pub use_edge_weights: bool,
+    #[serde(default)]
+    pub use_pos_in_nodes: bool,
     /// POS tags to include (e.g., ["NOUN", "ADJ", "PROPN"])
     #[serde(default)]
     pub include_pos: Vec<String>,
@@ -93,7 +97,7 @@ fn default_threshold() -> f64 {
     1e-6
 }
 fn default_window() -> usize {
-    4
+    3
 }
 fn default_top_n() -> usize {
     10
@@ -106,6 +110,9 @@ fn default_max_length() -> usize {
 }
 fn default_language() -> String {
     "en".to_string()
+}
+fn default_phrase_grouping() -> String {
+    "scrubbed_text".to_string()
 }
 
 impl Default for JsonConfig {
@@ -120,7 +127,9 @@ impl Default for JsonConfig {
             max_phrase_length: default_max_length(),
             score_aggregation: String::new(),
             language: default_language(),
+            phrase_grouping: default_phrase_grouping(),
             use_edge_weights: default_use_edge_weights(),
+            use_pos_in_nodes: true,
             include_pos: Vec::new(),
             stopwords: Vec::new(),
         }
@@ -138,7 +147,12 @@ impl From<JsonConfig> for TextRankConfig {
 
         // Parse include_pos from string tags
         let include_pos: Vec<PosTag> = if jc.include_pos.is_empty() {
-            vec![PosTag::Noun, PosTag::Adjective, PosTag::ProperNoun]
+            vec![
+                PosTag::Noun,
+                PosTag::Adjective,
+                PosTag::ProperNoun,
+                PosTag::Verb,
+            ]
         } else {
             jc.include_pos
                 .iter()
@@ -159,6 +173,8 @@ impl From<JsonConfig> for TextRankConfig {
             use_edge_weights: jc.use_edge_weights,
             include_pos,
             stopwords: jc.stopwords,
+            use_pos_in_nodes: jc.use_pos_in_nodes,
+            phrase_grouping: PhraseGrouping::from_str(&jc.phrase_grouping),
         }
     }
 }
@@ -219,6 +235,7 @@ pub fn extract_from_json(json_input: &str) -> PyResult<String> {
         config.window_size,
         config.use_edge_weights,
         Some(&config.include_pos),
+        config.use_pos_in_nodes,
     );
 
     if builder.is_empty() {
@@ -302,6 +319,7 @@ pub fn extract_batch_from_json(json_input: &str) -> PyResult<String> {
                 config.window_size,
                 config.use_edge_weights,
                 Some(&config.include_pos),
+                config.use_pos_in_nodes,
             );
 
             if builder.is_empty() {
@@ -387,6 +405,7 @@ mod tests {
             config.window_size,
             config.use_edge_weights,
             Some(&config.include_pos),
+            config.use_pos_in_nodes,
         );
 
         // Should have 2 nodes: "run" and "process" (the verbs)
@@ -397,26 +416,26 @@ mod tests {
             builder.node_count()
         );
         assert!(
-            builder.get_node_id("run").is_some(),
+            builder.get_node_id("run|VERB").is_some(),
             "Expected 'run' verb to be in graph"
         );
         assert!(
-            builder.get_node_id("process").is_some(),
+            builder.get_node_id("process|VERB").is_some(),
             "Expected 'process' verb to be in graph"
         );
         assert!(
-            builder.get_node_id("machine").is_none(),
+            builder.get_node_id("machine|NOUN").is_none(),
             "Noun 'machine' should not be in graph"
         );
         assert!(
-            builder.get_node_id("computer").is_none(),
+            builder.get_node_id("computer|NOUN").is_none(),
             "Noun 'computer' should not be in graph"
         );
     }
 
     #[test]
     fn test_json_config_default_include_pos() {
-        // When include_pos is empty/not provided, should default to [Noun, Adjective, ProperNoun]
+        // When include_pos is empty/not provided, should default to [Noun, Adjective, ProperNoun, Verb]
         let json_input = r#"{
             "tokens": [
                 {"text": "machine", "lemma": "machine", "pos": "NOUN", "start": 0, "end": 7, "sentence_idx": 0, "token_idx": 0}
@@ -428,7 +447,7 @@ mod tests {
         let config: TextRankConfig = doc.config.unwrap().into();
 
         // Should have default POS tags
-        assert_eq!(config.include_pos.len(), 3);
+        assert_eq!(config.include_pos.len(), 4);
         assert!(config.include_pos.contains(&crate::types::PosTag::Noun));
         assert!(config
             .include_pos
@@ -436,6 +455,7 @@ mod tests {
         assert!(config
             .include_pos
             .contains(&crate::types::PosTag::ProperNoun));
+        assert!(config.include_pos.contains(&crate::types::PosTag::Verb));
     }
 
     #[test]
@@ -468,14 +488,15 @@ mod tests {
             config.window_size,
             config.use_edge_weights,
             Some(&config.include_pos),
+            config.use_pos_in_nodes,
         );
 
         // Should have 2 nodes: "machine" (NOUN) and "smart" (ADJ)
         assert_eq!(builder.node_count(), 2);
-        assert!(builder.get_node_id("machine").is_some());
-        assert!(builder.get_node_id("smart").is_some());
+        assert!(builder.get_node_id("machine|NOUN").is_some());
+        assert!(builder.get_node_id("smart|ADJ").is_some());
         assert!(
-            builder.get_node_id("learn").is_none(),
+            builder.get_node_id("learn|VERB").is_none(),
             "Verb 'learn' should not be in graph"
         );
     }

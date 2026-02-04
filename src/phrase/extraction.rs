@@ -8,8 +8,27 @@ use super::dedup::{resolve_overlaps_greedy, ScoredChunk};
 use crate::graph::builder::GraphBuilder;
 use crate::graph::csr::CsrGraph;
 use crate::pagerank::PageRankResult;
-use crate::types::{Phrase, ScoreAggregation, TextRankConfig, Token};
+use crate::types::{Phrase, PhraseGrouping, ScoreAggregation, TextRankConfig, Token};
 use rustc_hash::FxHashMap;
+
+fn scrub_phrase_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last_was_space = false;
+
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            for lower in ch.to_lowercase() {
+                out.push(lower);
+            }
+            last_was_space = false;
+        } else if !last_was_space {
+            out.push(' ');
+            last_was_space = true;
+        }
+    }
+
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
 
 /// Phrase extractor that combines chunking, scoring, and deduplication
 #[derive(Debug)]
@@ -55,8 +74,8 @@ impl PhraseExtractor {
         // Resolve overlaps
         let deduped = resolve_overlaps_greedy(scored_chunks);
 
-        // Group by lemma and create phrases with canonical forms
-        let mut phrases = self.group_by_lemma(deduped);
+        // Group variants and create phrases with canonical forms
+        let mut phrases = self.group_phrases(deduped);
 
         // Sort by score descending
         phrases.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
@@ -93,7 +112,7 @@ impl PhraseExtractor {
                     .iter()
                     .filter_map(|t| {
                         graph
-                            .get_node_by_lemma(&t.lemma)
+                            .get_node_by_lemma(&t.graph_key(self.config.use_pos_in_nodes))
                             .map(|node_id| pagerank.score(node_id))
                     })
                     .collect();
@@ -112,54 +131,75 @@ impl PhraseExtractor {
             .collect()
     }
 
-    /// Group scored chunks by their lemmatized form
-    fn group_by_lemma(&self, chunks: Vec<ScoredChunk>) -> Vec<Phrase> {
-        // Group by lemma
+    /// Group scored chunks by the configured grouping strategy
+    fn group_phrases(&self, chunks: Vec<ScoredChunk>) -> Vec<Phrase> {
         let mut groups: FxHashMap<String, Vec<ScoredChunk>> = FxHashMap::default();
 
         for chunk in chunks {
-            groups.entry(chunk.lemma.clone()).or_default().push(chunk);
+            let key = match self.config.phrase_grouping {
+                PhraseGrouping::Lemma => chunk.lemma.clone(),
+                PhraseGrouping::ScrubbedText => scrub_phrase_text(&chunk.text),
+            };
+            groups.entry(key).or_default().push(chunk);
         }
 
-        // Create phrases with canonical forms
         groups
             .into_iter()
-            .map(|(lemma, variants)| {
-                // Count variant frequencies
-                let mut variant_counts: FxHashMap<String, usize> = FxHashMap::default();
-                let mut total_score = 0.0;
+            .map(|(group_key, variants)| {
                 let mut offsets = Vec::new();
-
                 for variant in &variants {
-                    *variant_counts.entry(variant.text.clone()).or_insert(0) += 1;
-                    total_score += variant.score;
                     offsets.push((variant.chunk.start_token, variant.chunk.end_token));
                 }
 
-                // Select canonical form (most frequent variant)
-                let canonical = variant_counts
-                    .into_iter()
-                    .max_by_key(|(_, count)| *count)
-                    .map(|(text, _)| text)
-                    .unwrap_or_else(|| lemma.clone());
-
-                // Aggregate score based on config
-                let score = match self.config.score_aggregation {
-                    ScoreAggregation::Sum => total_score,
-                    ScoreAggregation::Mean => total_score / variants.len() as f64,
-                    ScoreAggregation::Max => variants
-                        .iter()
-                        .map(|v| v.score)
-                        .fold(f64::NEG_INFINITY, f64::max),
-                    ScoreAggregation::RootMeanSquare => {
-                        let sum_sq: f64 = variants.iter().map(|v| v.score * v.score).sum();
-                        (sum_sq / variants.len() as f64).sqrt()
+                let (canonical_text, canonical_lemma) = match self.config.phrase_grouping {
+                    PhraseGrouping::Lemma => {
+                        let mut variant_counts: FxHashMap<String, usize> = FxHashMap::default();
+                        for variant in &variants {
+                            *variant_counts.entry(variant.text.clone()).or_insert(0) += 1;
+                        }
+                        let canonical = variant_counts
+                            .into_iter()
+                            .max_by_key(|(_, count)| *count)
+                            .map(|(text, _)| text)
+                            .unwrap_or_else(|| group_key.clone());
+                        (canonical, group_key)
+                    }
+                    PhraseGrouping::ScrubbedText => {
+                        let canonical_variant = variants
+                            .iter()
+                            .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap())
+                            .unwrap();
+                        (
+                            canonical_variant.text.clone(),
+                            canonical_variant.lemma.clone(),
+                        )
                     }
                 };
 
+                let score = match self.config.phrase_grouping {
+                    PhraseGrouping::ScrubbedText => variants
+                        .iter()
+                        .map(|v| v.score)
+                        .fold(f64::NEG_INFINITY, f64::max),
+                    PhraseGrouping::Lemma => match self.config.score_aggregation {
+                        ScoreAggregation::Sum => variants.iter().map(|v| v.score).sum(),
+                        ScoreAggregation::Mean => {
+                            variants.iter().map(|v| v.score).sum::<f64>() / variants.len() as f64
+                        }
+                        ScoreAggregation::Max => variants
+                            .iter()
+                            .map(|v| v.score)
+                            .fold(f64::NEG_INFINITY, f64::max),
+                        ScoreAggregation::RootMeanSquare => {
+                            let sum_sq: f64 = variants.iter().map(|v| v.score * v.score).sum();
+                            (sum_sq / variants.len() as f64).sqrt()
+                        }
+                    },
+                };
+
                 Phrase {
-                    text: canonical,
-                    lemma,
+                    text: canonical_text,
+                    lemma: canonical_lemma,
                     score,
                     count: variants.len(),
                     offsets,
@@ -199,6 +239,7 @@ pub fn extract_keyphrases_with_info(tokens: &[Token], config: &TextRankConfig) -
         config.window_size,
         config.use_edge_weights,
         include_pos,
+        config.use_pos_in_nodes,
     );
 
     if builder.is_empty() {

@@ -11,7 +11,7 @@ use crate::graph::builder::GraphBuilder;
 use crate::graph::csr::CsrGraph;
 use crate::pagerank::personalized::{focus_based_personalization, PersonalizedPageRank};
 use crate::phrase::extraction::{ExtractionResult, PhraseExtractor};
-use crate::types::{Phrase, TextRankConfig, Token};
+use crate::types::{Phrase, PosTag, TextRankConfig, Token};
 
 /// BiasedTextRank implementation
 #[derive(Debug)]
@@ -85,6 +85,7 @@ impl BiasedTextRank {
             self.config.window_size,
             self.config.use_edge_weights,
             include_pos,
+            self.config.use_pos_in_nodes,
         );
 
         if builder.is_empty() {
@@ -98,11 +99,7 @@ impl BiasedTextRank {
         let graph = CsrGraph::from_builder(&builder);
 
         // Find focus term node IDs
-        let focus_nodes: Vec<u32> = self
-            .focus_terms
-            .iter()
-            .filter_map(|term| graph.get_node_by_lemma(term))
-            .collect();
+        let focus_nodes = self.focus_node_ids(&graph);
 
         // Build personalization vector
         let personalization =
@@ -141,11 +138,7 @@ impl BiasedTextRank {
         self.focus_terms = new_focus.iter().map(|s| s.to_lowercase()).collect();
 
         // Find new focus term node IDs
-        let focus_nodes: Vec<u32> = self
-            .focus_terms
-            .iter()
-            .filter_map(|term| graph.get_node_by_lemma(term))
-            .collect();
+        let focus_nodes = self.focus_node_ids(graph);
 
         // Build new personalization vector
         let personalization =
@@ -162,6 +155,34 @@ impl BiasedTextRank {
         // Extract phrases
         let extractor = PhraseExtractor::with_config(self.config.clone());
         Some(extractor.extract(tokens, graph, &pagerank))
+    }
+
+    fn focus_node_ids(&self, graph: &CsrGraph) -> Vec<u32> {
+        if !self.config.use_pos_in_nodes {
+            return self
+                .focus_terms
+                .iter()
+                .filter_map(|term| graph.get_node_by_lemma(term))
+                .collect();
+        }
+
+        let default_pos = [PosTag::Noun, PosTag::Adjective, PosTag::ProperNoun];
+        let pos_tags: &[PosTag] = if self.config.include_pos.is_empty() {
+            &default_pos
+        } else {
+            self.config.include_pos.as_slice()
+        };
+
+        let mut nodes = Vec::new();
+        for term in &self.focus_terms {
+            for pos in pos_tags {
+                let key = format!("{}|{}", term, pos.as_str());
+                if let Some(node_id) = graph.get_node_by_lemma(&key) {
+                    nodes.push(node_id);
+                }
+            }
+        }
+        nodes
     }
 
     /// Get the current focus terms

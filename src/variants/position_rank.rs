@@ -56,6 +56,7 @@ impl PositionRank {
             self.config.window_size,
             self.config.use_edge_weights,
             include_pos,
+            self.config.use_pos_in_nodes,
         );
 
         if builder.is_empty() {
@@ -110,7 +111,7 @@ impl PositionRank {
             }
         }) {
             first_positions
-                .entry(token.lemma.clone())
+                .entry(token.graph_key(self.config.use_pos_in_nodes))
                 .or_insert(token.token_idx);
         }
 

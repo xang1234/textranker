@@ -115,7 +115,7 @@ impl GraphBuilder {
     /// This creates edges between tokens that co-occur within the window.
     /// Uses the default POS filter (Noun, Verb, Adjective, ProperNoun).
     pub fn from_tokens(tokens: &[Token], window_size: usize, use_weights: bool) -> Self {
-        Self::from_tokens_with_pos(tokens, window_size, use_weights, None)
+        Self::from_tokens_with_pos(tokens, window_size, use_weights, None, false)
     }
 
     /// Build a graph from tokens using a sliding window with custom POS filter
@@ -128,6 +128,7 @@ impl GraphBuilder {
         window_size: usize,
         use_weights: bool,
         include_pos: Option<&[PosTag]>,
+        use_pos_in_nodes: bool,
     ) -> Self {
         let mut builder = Self::with_capacity(tokens.len() / 2);
 
@@ -144,6 +145,10 @@ impl GraphBuilder {
                 }
             })
             .collect();
+        let candidate_keys: Vec<String> = candidates
+            .iter()
+            .map(|t| t.graph_key(use_pos_in_nodes))
+            .collect();
 
         // Process each sentence separately (don't create edges across sentences)
         let mut i = 0;
@@ -159,12 +164,12 @@ impl GraphBuilder {
 
             // Create nodes and edges within the sentence
             for j in sent_start..sent_end {
-                let node_j = builder.get_or_create_node(&candidates[j].lemma);
+                let node_j = builder.get_or_create_node(&candidate_keys[j]);
 
                 // Window extends forward
                 let window_end = std::cmp::min(j + window_size, sent_end);
-                for candidate in candidates[(j + 1)..window_end].iter() {
-                    let node_k = builder.get_or_create_node(&candidate.lemma);
+                for k in (j + 1)..window_end {
+                    let node_k = builder.get_or_create_node(&candidate_keys[k]);
                     if use_weights {
                         // Weighted mode: accumulate co-occurrence counts
                         builder.increment_edge(node_j, node_k, 1.0);
@@ -249,7 +254,7 @@ pub fn build_graph_parallel(
     window_size: usize,
     use_weights: bool,
 ) -> GraphBuilder {
-    build_graph_parallel_with_pos(tokens, window_size, use_weights, None)
+    build_graph_parallel_with_pos(tokens, window_size, use_weights, None, false)
 }
 
 /// Build a graph from tokens in parallel with custom POS filter
@@ -261,10 +266,17 @@ pub fn build_graph_parallel_with_pos(
     window_size: usize,
     use_weights: bool,
     include_pos: Option<&[PosTag]>,
+    use_pos_in_nodes: bool,
 ) -> GraphBuilder {
     // For small documents, sequential is faster
     if tokens.len() < 1000 {
-        return GraphBuilder::from_tokens_with_pos(tokens, window_size, use_weights, include_pos);
+        return GraphBuilder::from_tokens_with_pos(
+            tokens,
+            window_size,
+            use_weights,
+            include_pos,
+            use_pos_in_nodes,
+        );
     }
 
     // Group tokens by sentence for parallel processing
@@ -298,7 +310,7 @@ pub fn build_graph_parallel_with_pos(
 
     // Use specialized unweighted path for better deduplication with HashSet
     if !use_weights {
-        return build_unweighted_parallel(sentences, window_size);
+        return build_unweighted_parallel(sentences, window_size, use_pos_in_nodes);
     }
 
     // Convert lemmas to Arc<str> once before parallel processing
@@ -308,7 +320,7 @@ pub fn build_graph_parallel_with_pos(
         .map(|sent_tokens| {
             sent_tokens
                 .iter()
-                .map(|&t| (t, Arc::from(t.lemma.as_str())))
+                .map(|&t| (t, Arc::from(t.graph_key(use_pos_in_nodes))))
                 .collect()
         })
         .collect();
@@ -353,7 +365,11 @@ pub fn build_graph_parallel_with_pos(
 }
 
 /// Build unweighted graph in parallel using HashSet for efficient deduplication
-fn build_unweighted_parallel(sentences: Vec<Vec<&Token>>, window_size: usize) -> GraphBuilder {
+fn build_unweighted_parallel(
+    sentences: Vec<Vec<&Token>>,
+    window_size: usize,
+    use_pos_in_nodes: bool,
+) -> GraphBuilder {
     // Build partial edge sets in parallel - HashSet automatically deduplicates
     let partial_sets: Vec<FxHashSet<(Arc<str>, Arc<str>)>> = sentences
         .par_iter()
@@ -361,7 +377,7 @@ fn build_unweighted_parallel(sentences: Vec<Vec<&Token>>, window_size: usize) ->
             // Convert lemmas to Arc<str> once per sentence
             let lemma_arcs: Vec<Arc<str>> = sent_tokens
                 .iter()
-                .map(|t| Arc::from(t.lemma.as_str()))
+                .map(|t| Arc::from(t.graph_key(use_pos_in_nodes)))
                 .collect();
 
             let mut edge_set = FxHashSet::default();
@@ -599,14 +615,14 @@ mod tests {
 
         // Only include Nouns - should only have "machine"
         let builder_nouns =
-            GraphBuilder::from_tokens_with_pos(&tokens, 3, true, Some(&[PosTag::Noun]));
+            GraphBuilder::from_tokens_with_pos(&tokens, 3, true, Some(&[PosTag::Noun]), false);
         assert_eq!(builder_nouns.node_count(), 1);
         assert!(builder_nouns.get_node_id("machine").is_some());
         assert!(builder_nouns.get_node_id("run").is_none());
 
         // Only include Verbs - should only have "run"
         let builder_verbs =
-            GraphBuilder::from_tokens_with_pos(&tokens, 3, true, Some(&[PosTag::Verb]));
+            GraphBuilder::from_tokens_with_pos(&tokens, 3, true, Some(&[PosTag::Verb]), false);
         assert_eq!(builder_verbs.node_count(), 1);
         assert!(builder_verbs.get_node_id("run").is_some());
         assert!(builder_verbs.get_node_id("machine").is_none());
@@ -617,6 +633,7 @@ mod tests {
             3,
             true,
             Some(&[PosTag::Noun, PosTag::Verb]),
+            false,
         );
         assert_eq!(builder_both.node_count(), 2);
         assert!(builder_both.get_node_id("machine").is_some());
@@ -669,7 +686,7 @@ mod tests {
         }
 
         // With use_weights=false, the edge weight should be 1.0, not 500.0
-        let builder = build_graph_parallel_with_pos(&tokens, 2, false, None);
+        let builder = build_graph_parallel_with_pos(&tokens, 2, false, None, false);
 
         let machine_id = builder.get_node_id("machine").unwrap();
         let learning_id = builder.get_node_id("learning").unwrap();
@@ -726,7 +743,7 @@ mod tests {
         }
 
         // With use_weights=true, the edge weight should be 500.0 (accumulated)
-        let builder = build_graph_parallel_with_pos(&tokens, 2, true, None);
+        let builder = build_graph_parallel_with_pos(&tokens, 2, true, None, false);
 
         let machine_id = builder.get_node_id("machine").unwrap();
         let learning_id = builder.get_node_id("learning").unwrap();
@@ -787,7 +804,7 @@ mod tests {
         }
 
         // With use_weights=true, parallel path uses Arc<str> in FxHashMap keys
-        let builder = build_graph_parallel_with_pos(&tokens, 2, true, None);
+        let builder = build_graph_parallel_with_pos(&tokens, 2, true, None, false);
 
         // Verify graph structure
         assert_eq!(builder.node_count(), 3, "Should have 3 unique lemmas");

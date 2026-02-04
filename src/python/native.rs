@@ -6,7 +6,7 @@
 use crate::nlp::stopwords::StopwordFilter;
 use crate::nlp::tokenizer::Tokenizer;
 use crate::phrase::extraction::extract_keyphrases_with_info;
-use crate::types::{Phrase, ScoreAggregation, TextRankConfig};
+use crate::types::{Phrase, PhraseGrouping, ScoreAggregation, TextRankConfig};
 use crate::variants::biased_textrank::BiasedTextRank;
 use crate::variants::position_rank::PositionRank;
 use pyo3::prelude::*;
@@ -117,7 +117,7 @@ impl PyTextRankConfig {
         damping=0.85,
         max_iterations=100,
         convergence_threshold=1e-6,
-        window_size=4,
+        window_size=3,
         top_n=10,
         min_phrase_length=1,
         max_phrase_length=4,
@@ -125,7 +125,9 @@ impl PyTextRankConfig {
         language="en",
         use_edge_weights=true,
         include_pos=None,
-        stopwords=None
+        stopwords=None,
+        use_pos_in_nodes=true,
+        phrase_grouping="scrubbed_text"
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -141,6 +143,8 @@ impl PyTextRankConfig {
         use_edge_weights: bool,
         include_pos: Option<Vec<String>>,
         stopwords: Option<Vec<String>>,
+        use_pos_in_nodes: bool,
+        phrase_grouping: &str,
     ) -> PyResult<Self> {
         let aggregation = match score_aggregation.to_lowercase().as_str() {
             "sum" => ScoreAggregation::Sum,
@@ -165,6 +169,7 @@ impl PyTextRankConfig {
                 crate::types::PosTag::Noun,
                 crate::types::PosTag::Adjective,
                 crate::types::PosTag::ProperNoun,
+                crate::types::PosTag::Verb,
             ],
         };
 
@@ -181,6 +186,8 @@ impl PyTextRankConfig {
             use_edge_weights,
             include_pos: pos_tags,
             stopwords: stopwords.unwrap_or_default(),
+            use_pos_in_nodes,
+            phrase_grouping: PhraseGrouping::from_str(phrase_grouping),
         };
 
         config

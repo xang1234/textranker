@@ -164,6 +164,27 @@ impl PosTag {
             _ => PosTag::Other,
         }
     }
+
+    /// Get the spaCy-style POS tag string for this enum.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PosTag::Noun => "NOUN",
+            PosTag::Verb => "VERB",
+            PosTag::Adjective => "ADJ",
+            PosTag::Adverb => "ADV",
+            PosTag::Pronoun => "PRON",
+            PosTag::Determiner => "DET",
+            PosTag::Preposition => "ADP",
+            PosTag::Conjunction => "CCONJ",
+            PosTag::Interjection => "INTJ",
+            PosTag::Numeral => "NUM",
+            PosTag::Particle => "PART",
+            PosTag::Punctuation => "PUNCT",
+            PosTag::Symbol => "SYM",
+            PosTag::ProperNoun => "PROPN",
+            PosTag::Other => "X",
+        }
+    }
 }
 
 /// A token from the input text
@@ -207,6 +228,15 @@ impl Token {
             sentence_idx,
             token_idx,
             is_stopword: false,
+        }
+    }
+
+    /// Build the graph key for this token, optionally including POS.
+    pub fn graph_key(&self, use_pos_in_nodes: bool) -> String {
+        if use_pos_in_nodes {
+            format!("{}|{}", self.lemma, self.pos.as_str())
+        } else {
+            self.lemma.clone()
         }
     }
 
@@ -339,6 +369,29 @@ pub enum ScoreAggregation {
     RootMeanSquare,
 }
 
+// ============================================================================
+// Phrase Grouping
+// ============================================================================
+
+/// Methods for grouping phrase variants
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PhraseGrouping {
+    /// Group by lemmatized form (default)
+    #[default]
+    Lemma,
+    /// Group by scrubbed phrase text (lowercase, punctuation removed)
+    ScrubbedText,
+}
+
+impl PhraseGrouping {
+    pub fn from_str(value: &str) -> Self {
+        match value.to_lowercase().as_str() {
+            "scrubbed" | "scrubbed_text" | "text" => PhraseGrouping::ScrubbedText,
+            _ => PhraseGrouping::Lemma,
+        }
+    }
+}
+
 impl ScoreAggregation {
     /// Aggregate a slice of scores
     pub fn aggregate(&self, scores: &[f64]) -> f64 {
@@ -390,6 +443,10 @@ pub struct TextRankConfig {
     /// Optional additional stopwords list (extends the built-in list when provided)
     #[serde(default)]
     pub stopwords: Vec<String>,
+    /// Whether to include POS tags in graph node keys
+    pub use_pos_in_nodes: bool,
+    /// How to group phrase variants
+    pub phrase_grouping: PhraseGrouping,
 }
 
 impl Default for TextRankConfig {
@@ -398,15 +455,22 @@ impl Default for TextRankConfig {
             damping: 0.85,
             max_iterations: 100,
             convergence_threshold: 1e-6,
-            window_size: 4,
+            window_size: 3,
             top_n: 10,
             min_phrase_length: 1,
             max_phrase_length: 4,
             score_aggregation: ScoreAggregation::Sum,
             language: "en".to_string(),
             use_edge_weights: true,
-            include_pos: vec![PosTag::Noun, PosTag::Adjective, PosTag::ProperNoun],
+            include_pos: vec![
+                PosTag::Noun,
+                PosTag::Adjective,
+                PosTag::ProperNoun,
+                PosTag::Verb,
+            ],
             stopwords: Vec::new(),
+            use_pos_in_nodes: true,
+            phrase_grouping: PhraseGrouping::ScrubbedText,
         }
     }
 }

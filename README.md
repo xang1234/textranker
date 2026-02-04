@@ -182,12 +182,16 @@ config = TextRankConfig(
     damping=0.85,              # PageRank damping factor (0-1)
     max_iterations=100,        # Maximum PageRank iterations
     convergence_threshold=1e-6,# Convergence threshold
-    window_size=4,             # Co-occurrence window size
+    window_size=3,             # Co-occurrence window size
     top_n=10,                  # Number of results
     min_phrase_length=1,       # Minimum words in a phrase
     max_phrase_length=4,       # Maximum words in a phrase
     score_aggregation="sum",   # How to combine word scores: "sum", "mean", "max", "rms"
-    language="en"              # Language for stopwords
+    language="en",             # Language for stopwords
+    include_pos=["NOUN","ADJ","PROPN","VERB"],  # POS tags to include in the graph
+    use_pos_in_nodes=True,     # If True, graph nodes are lemma+POS
+    phrase_grouping="scrubbed_text",   # "lemma" or "scrubbed_text"
+    stopwords=["custom", "terms"]  # Additional stopwords (extends built-in list)
 )
 
 extractor = BaseTextRank(config=config)

@@ -79,11 +79,16 @@ if SPACY_AVAILABLE:
             "damping": 0.85,
             "max_iterations": 100,
             "convergence_threshold": 1e-6,
-            "window_size": 4,
+            "window_size": 3,
             "top_n": 10,
             "min_phrase_length": 1,
             "max_phrase_length": 4,
             "score_aggregation": "sum",
+            "include_pos": ["ADJ", "NOUN", "PROPN", "VERB"],
+            "use_pos_in_nodes": True,
+            "phrase_grouping": "scrubbed_text",
+            "language": "en",
+            "stopwords": None,
         },
     )
     def create_rapid_textrank(
@@ -97,6 +102,11 @@ if SPACY_AVAILABLE:
         min_phrase_length: int,
         max_phrase_length: int,
         score_aggregation: str,
+        include_pos: Optional[List[str]],
+        use_pos_in_nodes: bool,
+        phrase_grouping: str,
+        language: str,
+        stopwords: Optional[List[str]],
     ):
         """Create a RustTextRank pipeline component."""
         return RustTextRank(
@@ -110,6 +120,11 @@ if SPACY_AVAILABLE:
             min_phrase_length=min_phrase_length,
             max_phrase_length=max_phrase_length,
             score_aggregation=score_aggregation,
+            include_pos=include_pos,
+            use_pos_in_nodes=use_pos_in_nodes,
+            phrase_grouping=phrase_grouping,
+            language=language,
+            stopwords=stopwords,
         )
 
     class RustTextRank:
@@ -135,11 +150,16 @@ if SPACY_AVAILABLE:
             damping: float = 0.85,
             max_iterations: int = 100,
             convergence_threshold: float = 1e-6,
-            window_size: int = 4,
+            window_size: int = 3,
             top_n: int = 10,
             min_phrase_length: int = 1,
             max_phrase_length: int = 4,
             score_aggregation: str = "sum",
+            include_pos: Optional[List[str]] = None,
+            use_pos_in_nodes: bool = True,
+            phrase_grouping: str = "scrubbed_text",
+            language: str = "en",
+            stopwords: Optional[List[str]] = None,
         ):
             self.nlp = nlp
             self.name = name
@@ -152,7 +172,14 @@ if SPACY_AVAILABLE:
                 "min_phrase_length": min_phrase_length,
                 "max_phrase_length": max_phrase_length,
                 "score_aggregation": score_aggregation,
+                "use_pos_in_nodes": use_pos_in_nodes,
+                "phrase_grouping": phrase_grouping,
+                "language": language,
             }
+            if include_pos is not None:
+                self.config["include_pos"] = include_pos
+            if stopwords is not None:
+                self.config["stopwords"] = stopwords
 
             # Register custom extensions
             if not Doc.has_extension("phrases"):
