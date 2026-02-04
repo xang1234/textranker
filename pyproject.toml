@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rapid_textrank"
-version = "0.0.1"
+version = "0.1.0"
 description = "High-performance TextRank implementation with Python bindings"
 readme = { file = "README.md", content-type = "text/markdown" }
 license = "MIT"

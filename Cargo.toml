@@ -1,6 +1,6 @@
 [package]
 name = "rapid_textrank"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 authors = ["TextRanker Contributors"]
 description = "High-performance TextRank implementation with Python bindings"
