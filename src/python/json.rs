@@ -173,8 +173,13 @@ pub fn extract_from_json(json_input: &str) -> PyResult<String> {
     // Convert tokens
     let tokens: Vec<Token> = doc.tokens.into_iter().map(Token::from).collect();
 
-    // Build graph
-    let builder = GraphBuilder::from_tokens(&tokens, config.window_size, config.use_edge_weights);
+    // Build graph with POS filtering from config
+    let builder = GraphBuilder::from_tokens_with_pos(
+        &tokens,
+        config.window_size,
+        config.use_edge_weights,
+        Some(&config.include_pos),
+    );
 
     if builder.is_empty() {
         let result = JsonResult {
@@ -240,8 +245,12 @@ pub fn extract_batch_from_json(json_input: &str) -> PyResult<String> {
             let config: TextRankConfig = doc.config.unwrap_or_default().into();
             let tokens: Vec<Token> = doc.tokens.into_iter().map(Token::from).collect();
 
-            let builder =
-                GraphBuilder::from_tokens(&tokens, config.window_size, config.use_edge_weights);
+            let builder = GraphBuilder::from_tokens_with_pos(
+                &tokens,
+                config.window_size,
+                config.use_edge_weights,
+                Some(&config.include_pos),
+            );
 
             if builder.is_empty() {
                 return JsonResult {
@@ -281,4 +290,117 @@ pub fn extract_batch_from_json(json_input: &str) -> PyResult<String> {
 
     serde_json::to_string(&results)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_json_include_pos_filtering() {
+        // Create JSON with tokens of various POS, config with include_pos=["VERB"]
+        // Verify only verbs appear in results (by checking that noun-only keyphrases are excluded)
+        let json_input = r#"{
+            "tokens": [
+                {"text": "machine", "lemma": "machine", "pos": "NOUN", "start": 0, "end": 7, "sentence_idx": 0, "token_idx": 0},
+                {"text": "runs", "lemma": "run", "pos": "VERB", "start": 8, "end": 12, "sentence_idx": 0, "token_idx": 1},
+                {"text": "fast", "lemma": "fast", "pos": "ADV", "start": 13, "end": 17, "sentence_idx": 0, "token_idx": 2},
+                {"text": "computer", "lemma": "computer", "pos": "NOUN", "start": 18, "end": 26, "sentence_idx": 0, "token_idx": 3},
+                {"text": "processes", "lemma": "process", "pos": "VERB", "start": 27, "end": 36, "sentence_idx": 0, "token_idx": 4}
+            ],
+            "config": {
+                "include_pos": ["VERB"],
+                "top_n": 10
+            }
+        }"#;
+
+        // Parse and convert to TextRankConfig to verify include_pos is respected
+        let doc: JsonDocument = serde_json::from_str(json_input).unwrap();
+        let config: TextRankConfig = doc.config.unwrap().into();
+
+        // Verify the config has only VERB in include_pos
+        assert_eq!(config.include_pos.len(), 1);
+        assert_eq!(config.include_pos[0], crate::types::PosTag::Verb);
+
+        // Build graph with the config - should only include verbs
+        let tokens: Vec<Token> = serde_json::from_str::<JsonDocument>(json_input)
+            .unwrap()
+            .tokens
+            .into_iter()
+            .map(Token::from)
+            .collect();
+
+        let builder = GraphBuilder::from_tokens_with_pos(
+            &tokens,
+            config.window_size,
+            config.use_edge_weights,
+            Some(&config.include_pos),
+        );
+
+        // Should have 2 nodes: "run" and "process" (the verbs)
+        assert_eq!(builder.node_count(), 2, "Expected 2 verb nodes, got {}", builder.node_count());
+        assert!(builder.get_node_id("run").is_some(), "Expected 'run' verb to be in graph");
+        assert!(builder.get_node_id("process").is_some(), "Expected 'process' verb to be in graph");
+        assert!(builder.get_node_id("machine").is_none(), "Noun 'machine' should not be in graph");
+        assert!(builder.get_node_id("computer").is_none(), "Noun 'computer' should not be in graph");
+    }
+
+    #[test]
+    fn test_json_config_default_include_pos() {
+        // When include_pos is empty/not provided, should default to [Noun, Adjective, ProperNoun]
+        let json_input = r#"{
+            "tokens": [
+                {"text": "machine", "lemma": "machine", "pos": "NOUN", "start": 0, "end": 7, "sentence_idx": 0, "token_idx": 0}
+            ],
+            "config": {}
+        }"#;
+
+        let doc: JsonDocument = serde_json::from_str(json_input).unwrap();
+        let config: TextRankConfig = doc.config.unwrap().into();
+
+        // Should have default POS tags
+        assert_eq!(config.include_pos.len(), 3);
+        assert!(config.include_pos.contains(&crate::types::PosTag::Noun));
+        assert!(config.include_pos.contains(&crate::types::PosTag::Adjective));
+        assert!(config.include_pos.contains(&crate::types::PosTag::ProperNoun));
+    }
+
+    #[test]
+    fn test_json_include_pos_multiple_tags() {
+        // Test with multiple POS tags in include_pos
+        let json_input = r#"{
+            "tokens": [
+                {"text": "machine", "lemma": "machine", "pos": "NOUN", "start": 0, "end": 7, "sentence_idx": 0, "token_idx": 0},
+                {"text": "learning", "lemma": "learn", "pos": "VERB", "start": 8, "end": 16, "sentence_idx": 0, "token_idx": 1},
+                {"text": "smart", "lemma": "smart", "pos": "ADJ", "start": 17, "end": 22, "sentence_idx": 0, "token_idx": 2}
+            ],
+            "config": {
+                "include_pos": ["NOUN", "ADJ"],
+                "window_size": 4
+            }
+        }"#;
+
+        let doc: JsonDocument = serde_json::from_str(json_input).unwrap();
+        let config: TextRankConfig = doc.config.unwrap().into();
+
+        let tokens: Vec<Token> = serde_json::from_str::<JsonDocument>(json_input)
+            .unwrap()
+            .tokens
+            .into_iter()
+            .map(Token::from)
+            .collect();
+
+        let builder = GraphBuilder::from_tokens_with_pos(
+            &tokens,
+            config.window_size,
+            config.use_edge_weights,
+            Some(&config.include_pos),
+        );
+
+        // Should have 2 nodes: "machine" (NOUN) and "smart" (ADJ)
+        assert_eq!(builder.node_count(), 2);
+        assert!(builder.get_node_id("machine").is_some());
+        assert!(builder.get_node_id("smart").is_some());
+        assert!(builder.get_node_id("learn").is_none(), "Verb 'learn' should not be in graph");
+    }
 }

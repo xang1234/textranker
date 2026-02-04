@@ -315,13 +315,19 @@ pub fn build_graph_parallel_with_pos(
         })
         .collect();
 
-    // Merge partial graphs
+    // Merge partial graphs - respect use_weights setting
     let mut builder = GraphBuilder::new();
     for partial in partial_graphs {
         for ((a, b), weight) in partial {
             let id_a = builder.get_or_create_node(&a);
             let id_b = builder.get_or_create_node(&b);
-            builder.increment_edge(id_a, id_b, weight);
+            if use_weights {
+                // Weighted mode: accumulate co-occurrence counts across sentences
+                builder.increment_edge(id_a, id_b, weight);
+            } else {
+                // Binary mode: edge exists (1.0) or doesn't, no accumulation
+                builder.set_edge(id_a, id_b, 1.0);
+            }
         }
     }
 
@@ -533,5 +539,118 @@ mod tests {
         assert_eq!(builder_both.node_count(), 2);
         assert!(builder_both.get_node_id("machine").is_some());
         assert!(builder_both.get_node_id("run").is_some());
+    }
+
+    #[test]
+    fn test_parallel_use_edge_weights_false_across_sentences() {
+        // Create tokens spanning multiple sentences with the same pair
+        // to verify the parallel merge respects use_weights=false
+        // We need > 1000 tokens to trigger parallel path, so we'll test
+        // by calling build_graph_parallel_with_pos directly with a smaller threshold
+        // For this test, we verify the merge logic works correctly by building
+        // a scenario with multiple sentences containing the same word pair.
+
+        // Build many tokens to ensure we hit the parallel code path
+        let mut tokens = Vec::with_capacity(1500);
+        for sent_idx in 0..500 {
+            // Each sentence has "machine learning" pair
+            tokens.push(Token {
+                text: "machine".to_string(),
+                lemma: "machine".to_string(),
+                pos: PosTag::Noun,
+                start: 0,
+                end: 7,
+                sentence_idx: sent_idx,
+                token_idx: sent_idx * 3,
+                is_stopword: false,
+            });
+            tokens.push(Token {
+                text: "learning".to_string(),
+                lemma: "learning".to_string(),
+                pos: PosTag::Noun,
+                start: 8,
+                end: 16,
+                sentence_idx: sent_idx,
+                token_idx: sent_idx * 3 + 1,
+                is_stopword: false,
+            });
+            tokens.push(Token {
+                text: "system".to_string(),
+                lemma: "system".to_string(),
+                pos: PosTag::Noun,
+                start: 17,
+                end: 23,
+                sentence_idx: sent_idx,
+                token_idx: sent_idx * 3 + 2,
+                is_stopword: false,
+            });
+        }
+
+        // With use_weights=false, the edge weight should be 1.0, not 500.0
+        let builder = build_graph_parallel_with_pos(&tokens, 2, false, None);
+
+        let machine_id = builder.get_node_id("machine").unwrap();
+        let learning_id = builder.get_node_id("learning").unwrap();
+
+        let weight = builder.get_node(machine_id).unwrap().edges.get(&learning_id);
+        assert!(weight.is_some());
+        assert_eq!(
+            *weight.unwrap(),
+            1.0,
+            "Expected binary weight = 1.0, got {} (parallel merge should not accumulate with use_weights=false)",
+            weight.unwrap()
+        );
+    }
+
+    #[test]
+    fn test_parallel_use_edge_weights_true_across_sentences() {
+        // Same setup, but with use_weights=true - should accumulate
+        let mut tokens = Vec::with_capacity(1500);
+        for sent_idx in 0..500 {
+            tokens.push(Token {
+                text: "machine".to_string(),
+                lemma: "machine".to_string(),
+                pos: PosTag::Noun,
+                start: 0,
+                end: 7,
+                sentence_idx: sent_idx,
+                token_idx: sent_idx * 3,
+                is_stopword: false,
+            });
+            tokens.push(Token {
+                text: "learning".to_string(),
+                lemma: "learning".to_string(),
+                pos: PosTag::Noun,
+                start: 8,
+                end: 16,
+                sentence_idx: sent_idx,
+                token_idx: sent_idx * 3 + 1,
+                is_stopword: false,
+            });
+            tokens.push(Token {
+                text: "system".to_string(),
+                lemma: "system".to_string(),
+                pos: PosTag::Noun,
+                start: 17,
+                end: 23,
+                sentence_idx: sent_idx,
+                token_idx: sent_idx * 3 + 2,
+                is_stopword: false,
+            });
+        }
+
+        // With use_weights=true, the edge weight should be 500.0 (accumulated)
+        let builder = build_graph_parallel_with_pos(&tokens, 2, true, None);
+
+        let machine_id = builder.get_node_id("machine").unwrap();
+        let learning_id = builder.get_node_id("learning").unwrap();
+
+        let weight = builder.get_node(machine_id).unwrap().edges.get(&learning_id);
+        assert!(weight.is_some());
+        assert_eq!(
+            *weight.unwrap(),
+            500.0,
+            "Expected accumulated weight = 500.0 (parallel merge should accumulate with use_weights=true)"
+        );
     }
 }
