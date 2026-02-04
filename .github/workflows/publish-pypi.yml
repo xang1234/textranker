@@ -11,24 +11,30 @@ permissions:
 
 jobs:
   build-wheels:
-    name: Build wheels (${{ matrix.os }})
+    name: Build wheels (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.9", "3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          args: --release --out dist
+          args: --release --out dist --interpreter python
           manylinux: auto
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}
+          name: wheels-${{ matrix.os }}-py${{ matrix.python }}
           path: dist/*
 
   build-sdist:
@@ -62,23 +68,12 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - name: Download wheels (Linux)
+      - name: Download wheels
         uses: actions/download-artifact@v4
         with:
-          name: wheels-ubuntu-latest
+          pattern: wheels-*
           path: dist
-
-      - name: Download wheels (macOS)
-        uses: actions/download-artifact@v4
-        with:
-          name: wheels-macos-latest
-          path: dist
-
-      - name: Download wheels (Windows)
-        uses: actions/download-artifact@v4
-        with:
-          name: wheels-windows-latest
-          path: dist
+          merge-multiple: true
 
       - name: Download sdist
         uses: actions/download-artifact@v4

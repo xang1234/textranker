@@ -496,12 +496,20 @@ git tag -a test-0.1.0 -m "TestPyPI 0.1.0"
 git push origin test-0.1.0
 ```
 
+Tag pattern: `test-*`
+
 PyPI release (push a tag):
 
 ```bash
 git tag -a v0.1.0 -m "Release 0.1.0"
 git push origin v0.1.0
 ```
+
+Tag pattern: `v*`
+
+Wheel builds
+
+GitHub Actions builds wheels for Python 3.9–3.12 on Linux, macOS, and Windows.
 
 Before the first publish, add Trusted Publishers on TestPyPI and PyPI:
 
