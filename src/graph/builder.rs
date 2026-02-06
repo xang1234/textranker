@@ -123,12 +123,38 @@ impl GraphBuilder {
     /// This creates edges between tokens that co-occur within the window.
     /// If `include_pos` is None, uses the default content word filter.
     /// If `include_pos` is Some, only includes tokens with matching POS tags.
+    /// Sentence boundaries are always respected (no cross-sentence edges).
     pub fn from_tokens_with_pos(
         tokens: &[Token],
         window_size: usize,
         use_weights: bool,
         include_pos: Option<&[PosTag]>,
         use_pos_in_nodes: bool,
+    ) -> Self {
+        Self::from_tokens_with_pos_and_boundaries(
+            tokens,
+            window_size,
+            use_weights,
+            include_pos,
+            use_pos_in_nodes,
+            true, // default: respect sentence boundaries
+        )
+    }
+
+    /// Build a graph from tokens using a sliding window with custom POS filter
+    /// and optional cross-sentence windowing.
+    ///
+    /// When `respect_sentence_boundaries` is `true`, edges are only created
+    /// between tokens in the same sentence (standard TextRank behaviour).
+    /// When `false`, the window slides across the entire document, ignoring
+    /// sentence boundaries (needed by SingleRank and Topical PageRank).
+    pub fn from_tokens_with_pos_and_boundaries(
+        tokens: &[Token],
+        window_size: usize,
+        use_weights: bool,
+        include_pos: Option<&[PosTag]>,
+        use_pos_in_nodes: bool,
+        respect_sentence_boundaries: bool,
     ) -> Self {
         let mut builder = Self::with_capacity(tokens.len() / 2);
 
@@ -150,31 +176,46 @@ impl GraphBuilder {
             .map(|t| t.graph_key(use_pos_in_nodes))
             .collect();
 
-        // Process each sentence separately (don't create edges across sentences)
-        let mut i = 0;
-        while i < candidates.len() {
-            let sent_idx = candidates[i].sentence_idx;
+        if respect_sentence_boundaries {
+            // Process each sentence separately (don't create edges across sentences)
+            let mut i = 0;
+            while i < candidates.len() {
+                let sent_idx = candidates[i].sentence_idx;
 
-            // Find all candidates in this sentence
-            let sent_start = i;
-            while i < candidates.len() && candidates[i].sentence_idx == sent_idx {
-                i += 1;
+                // Find all candidates in this sentence
+                let sent_start = i;
+                while i < candidates.len() && candidates[i].sentence_idx == sent_idx {
+                    i += 1;
+                }
+                let sent_end = i;
+
+                // Create nodes and edges within the sentence
+                for j in sent_start..sent_end {
+                    let node_j = builder.get_or_create_node(&candidate_keys[j]);
+
+                    // Window extends forward
+                    let window_end = std::cmp::min(j + window_size, sent_end);
+                    for key in candidate_keys.iter().take(window_end).skip(j + 1) {
+                        let node_k = builder.get_or_create_node(key);
+                        if use_weights {
+                            builder.increment_edge(node_j, node_k, 1.0);
+                        } else {
+                            builder.set_edge(node_j, node_k, 1.0);
+                        }
+                    }
+                }
             }
-            let sent_end = i;
-
-            // Create nodes and edges within the sentence
-            for j in sent_start..sent_end {
+        } else {
+            // Single pass: window slides across the entire candidate sequence
+            for j in 0..candidates.len() {
                 let node_j = builder.get_or_create_node(&candidate_keys[j]);
 
-                // Window extends forward
-                let window_end = std::cmp::min(j + window_size, sent_end);
+                let window_end = std::cmp::min(j + window_size, candidates.len());
                 for key in candidate_keys.iter().take(window_end).skip(j + 1) {
                     let node_k = builder.get_or_create_node(key);
                     if use_weights {
-                        // Weighted mode: accumulate co-occurrence counts
                         builder.increment_edge(node_j, node_k, 1.0);
                     } else {
-                        // Binary mode: edge exists (1.0) or doesn't, no accumulation
                         builder.set_edge(node_j, node_k, 1.0);
                     }
                 }
@@ -362,6 +403,37 @@ pub fn build_graph_parallel_with_pos(
     }
 
     builder
+}
+
+/// Build a graph from tokens in parallel with custom POS filter and optional
+/// cross-sentence windowing.
+///
+/// When `respect_sentence_boundaries` is `false`, the parallel sentence-based
+/// splitting doesn't apply, so this falls back to the sequential
+/// `from_tokens_with_pos_and_boundaries`. For `true`, delegates to
+/// `build_graph_parallel_with_pos`.
+pub fn build_graph_parallel_with_pos_and_boundaries(
+    tokens: &[Token],
+    window_size: usize,
+    use_weights: bool,
+    include_pos: Option<&[PosTag]>,
+    use_pos_in_nodes: bool,
+    respect_sentence_boundaries: bool,
+) -> GraphBuilder {
+    if respect_sentence_boundaries {
+        build_graph_parallel_with_pos(tokens, window_size, use_weights, include_pos, use_pos_in_nodes)
+    } else {
+        // Cross-sentence windowing: the window spans the entire document,
+        // so sentence-based parallelism doesn't apply. Use the sequential path.
+        GraphBuilder::from_tokens_with_pos_and_boundaries(
+            tokens,
+            window_size,
+            use_weights,
+            include_pos,
+            use_pos_in_nodes,
+            false,
+        )
+    }
 }
 
 /// Build unweighted graph in parallel using HashSet for efficient deduplication
@@ -818,6 +890,139 @@ mod tests {
             *weight.unwrap(),
             400.0,
             "Arc<str> parallel path should correctly accumulate weights"
+        );
+    }
+
+    // --- Cross-sentence boundary tests ---
+
+    #[test]
+    fn test_cross_sentence_edges_when_boundaries_disabled() {
+        // "learning" (sent 0) should connect to "deep" (sent 1) with window=3
+        let tokens = vec![
+            make_token("machine", "machine", 0, 0),
+            make_token("learning", "learning", 0, 1),
+            make_token("deep", "deep", 1, 2),
+            make_token("neural", "neural", 1, 3),
+        ];
+
+        let builder = GraphBuilder::from_tokens_with_pos_and_boundaries(
+            &tokens, 3, true, None, false, false,
+        );
+
+        let learning_id = builder.get_node_id("learning").unwrap();
+        let deep_id = builder.get_node_id("deep").unwrap();
+        let learning_node = builder.get_node(learning_id).unwrap();
+        assert!(
+            learning_node.edges.contains_key(&deep_id),
+            "Cross-sentence edge should exist when boundaries are disabled"
+        );
+    }
+
+    #[test]
+    fn test_no_cross_sentence_edges_when_boundaries_enabled() {
+        // Same tokens as above, but with boundaries respected
+        let tokens = vec![
+            make_token("machine", "machine", 0, 0),
+            make_token("learning", "learning", 0, 1),
+            make_token("deep", "deep", 1, 2),
+            make_token("neural", "neural", 1, 3),
+        ];
+
+        let builder = GraphBuilder::from_tokens_with_pos_and_boundaries(
+            &tokens, 3, true, None, false, true,
+        );
+
+        let learning_id = builder.get_node_id("learning").unwrap();
+        let deep_id = builder.get_node_id("deep").unwrap();
+        let learning_node = builder.get_node(learning_id).unwrap();
+        assert!(
+            !learning_node.edges.contains_key(&deep_id),
+            "Cross-sentence edge should NOT exist when boundaries are respected"
+        );
+    }
+
+    #[test]
+    fn test_cross_sentence_weighted_accumulation() {
+        // Sequence: [machine, learning, machine, learning, machine, learning]
+        // With window_size=2, each position j pairs with j+1.
+        // Pairs: (0,1) (1,2) (2,3) (3,4) (4,5) — all are machine↔learning = 5 hits
+        let tokens = vec![
+            make_token("machine", "machine", 0, 0),
+            make_token("learning", "learning", 0, 1),
+            make_token("machine", "machine", 1, 2),
+            make_token("learning", "learning", 1, 3),
+            make_token("machine", "machine", 2, 4),
+            make_token("learning", "learning", 2, 5),
+        ];
+
+        let builder = GraphBuilder::from_tokens_with_pos_and_boundaries(
+            &tokens, 2, true, None, false, false,
+        );
+
+        let machine_id = builder.get_node_id("machine").unwrap();
+        let learning_id = builder.get_node_id("learning").unwrap();
+        let weight = *builder
+            .get_node(machine_id)
+            .unwrap()
+            .edges
+            .get(&learning_id)
+            .unwrap();
+        assert_eq!(
+            weight, 5.0,
+            "machine-learning pair should accumulate to 5.0 across all sentence boundaries"
+        );
+    }
+
+    #[test]
+    fn test_cross_sentence_binary_mode() {
+        // Same pair multiple times, but binary mode should keep weight at 1.0
+        let tokens = vec![
+            make_token("machine", "machine", 0, 0),
+            make_token("learning", "learning", 0, 1),
+            make_token("machine", "machine", 1, 2),
+            make_token("learning", "learning", 1, 3),
+            make_token("machine", "machine", 2, 4),
+            make_token("learning", "learning", 2, 5),
+        ];
+
+        let builder = GraphBuilder::from_tokens_with_pos_and_boundaries(
+            &tokens, 2, false, None, false, false,
+        );
+
+        let machine_id = builder.get_node_id("machine").unwrap();
+        let learning_id = builder.get_node_id("learning").unwrap();
+        let weight = *builder
+            .get_node(machine_id)
+            .unwrap()
+            .edges
+            .get(&learning_id)
+            .unwrap();
+        assert_eq!(
+            weight, 1.0,
+            "Binary mode should keep weight at 1.0 even with multiple co-occurrences"
+        );
+    }
+
+    #[test]
+    fn test_parallel_cross_sentence() {
+        // Parallel builder with boundaries disabled should create cross-sentence edges
+        let tokens = vec![
+            make_token("machine", "machine", 0, 0),
+            make_token("learning", "learning", 0, 1),
+            make_token("deep", "deep", 1, 2),
+            make_token("neural", "neural", 1, 3),
+        ];
+
+        let builder = build_graph_parallel_with_pos_and_boundaries(
+            &tokens, 3, true, None, false, false,
+        );
+
+        let learning_id = builder.get_node_id("learning").unwrap();
+        let deep_id = builder.get_node_id("deep").unwrap();
+        let learning_node = builder.get_node(learning_id).unwrap();
+        assert!(
+            learning_node.edges.contains_key(&deep_id),
+            "Parallel builder with boundaries=false should create cross-sentence edges"
         );
     }
 }
