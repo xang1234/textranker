@@ -37,7 +37,18 @@ fn test_full_pipeline() {
 
     // Build graph
     let config = TextRankConfig::default().with_top_n(10);
-    let builder = graph::builder::GraphBuilder::from_tokens(&tokens, config.window_size, true);
+    let include_pos = if config.include_pos.is_empty() {
+        None
+    } else {
+        Some(config.include_pos.as_slice())
+    };
+    let builder = graph::builder::GraphBuilder::from_tokens_with_pos(
+        &tokens,
+        config.window_size,
+        config.use_edge_weights,
+        include_pos,
+        config.use_pos_in_nodes,
+    );
 
     assert!(!builder.is_empty());
 
