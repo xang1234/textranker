@@ -279,12 +279,11 @@ impl TopicRank {
                 let mut weight = 0.0;
                 for &source_idx in &clusters[i] {
                     for &target_idx in &clusters[j] {
-                        let source_start = candidates[source_idx].chunk.start_token;
-                        let target_start = candidates[target_idx].chunk.start_token;
-                        let distance = source_start.abs_diff(target_start);
-                        if distance > 0 {
-                            weight += 1.0 / distance as f64;
-                        }
+                        let gap = compute_gap(
+                            &candidates[source_idx].chunk,
+                            &candidates[target_idx].chunk,
+                        );
+                        weight += 1.0 / gap as f64;
                     }
                 }
                 if weight > 0.0 {
@@ -341,6 +340,21 @@ impl TopicRank {
             })
             .collect()
     }
+}
+
+/// Compute PKE-style positional gap between two chunks.
+/// Measures distance from the end of the earlier phrase to the start of the later,
+/// floored at 1 to avoid division by zero.
+fn compute_gap(a: &crate::types::ChunkSpan, b: &crate::types::ChunkSpan) -> usize {
+    let raw = a.start_token.abs_diff(b.start_token);
+    let span_adjust = if a.start_token < b.start_token {
+        (a.end_token - a.start_token).saturating_sub(1)
+    } else if a.start_token > b.start_token {
+        (b.end_token - b.start_token).saturating_sub(1)
+    } else {
+        0
+    };
+    raw.saturating_sub(span_adjust).max(1)
 }
 
 /// A phrase candidate with its stems for clustering
@@ -559,5 +573,42 @@ mod tests {
             let clusters = topic_rank.cluster_phrases(&candidates);
             assert_eq!(clusters.len(), 2);
         }
+    }
+
+    #[test]
+    fn test_compute_gap() {
+        use crate::types::ChunkSpan;
+
+        fn span(start: usize, end: usize) -> ChunkSpan {
+            ChunkSpan {
+                start_token: start,
+                end_token: end,
+                start_char: 0,
+                end_char: 0,
+                sentence_idx: 0,
+            }
+        }
+
+        // Adjacent single-token phrases: gap = |0 - 1| - 0 = 1
+        assert_eq!(compute_gap(&span(0, 1), &span(1, 2)), 1);
+
+        // Adjacent multi-token phrases: A=[0,2), B=[2,4)
+        // raw=2, span_adjust=(2-0)-1=1, gap=2-1=1
+        assert_eq!(compute_gap(&span(0, 2), &span(2, 4)), 1);
+
+        // Same position: gap floors at 1
+        assert_eq!(compute_gap(&span(3, 5), &span(3, 5)), 1);
+
+        // Distant phrases: A=[0,3), B=[10,12)
+        // raw=10, span_adjust=(3-0)-1=2, gap=10-2=8
+        assert_eq!(compute_gap(&span(0, 3), &span(10, 12)), 8);
+
+        // Reversed order: A=[10,12), B=[0,3)
+        // raw=10, span_adjust=(3-0)-1=2, gap=10-2=8
+        assert_eq!(compute_gap(&span(10, 12), &span(0, 3)), 8);
+
+        // Overlapping phrases: A=[0,5), B=[3,7)
+        // raw=3, span_adjust=(5-0)-1=4, gap=max(3-4,0)=0 -> floored to 1
+        assert_eq!(compute_gap(&span(0, 5), &span(3, 7)), 1);
     }
 }
