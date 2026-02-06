@@ -496,7 +496,10 @@ mod tests {
 
         // Identical candidates merge (distance 0.0 <= 0.74)
         {
-            let candidates = vec![make_candidate(&["a", "b"], 0), make_candidate(&["a", "b"], 1)];
+            let candidates = vec![
+                make_candidate(&["a", "b"], 0),
+                make_candidate(&["a", "b"], 1),
+            ];
             let clusters = topic_rank.cluster_phrases(&candidates);
             assert_eq!(clusters.len(), 1);
         }
