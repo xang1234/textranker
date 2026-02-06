@@ -187,7 +187,7 @@ impl PyTextRankConfig {
             include_pos: pos_tags,
             stopwords: stopwords.unwrap_or_default(),
             use_pos_in_nodes,
-            phrase_grouping: PhraseGrouping::from_str(phrase_grouping),
+            phrase_grouping: phrase_grouping.parse().unwrap_or(PhraseGrouping::Lemma),
         };
 
         config

@@ -168,8 +168,8 @@ impl GraphBuilder {
 
                 // Window extends forward
                 let window_end = std::cmp::min(j + window_size, sent_end);
-                for k in (j + 1)..window_end {
-                    let node_k = builder.get_or_create_node(&candidate_keys[k]);
+                for key in candidate_keys.iter().take(window_end).skip(j + 1) {
+                    let node_k = builder.get_or_create_node(key);
                     if use_weights {
                         // Weighted mode: accumulate co-occurrence counts
                         builder.increment_edge(node_j, node_k, 1.0);

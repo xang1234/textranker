@@ -174,7 +174,7 @@ impl From<JsonConfig> for TextRankConfig {
             include_pos,
             stopwords: jc.stopwords,
             use_pos_in_nodes: jc.use_pos_in_nodes,
-            phrase_grouping: PhraseGrouping::from_str(&jc.phrase_grouping),
+            phrase_grouping: jc.phrase_grouping.parse().unwrap_or(PhraseGrouping::Lemma),
         }
     }
 }

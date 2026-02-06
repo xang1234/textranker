@@ -257,9 +257,9 @@ impl TopicRank {
                 let mut weight = 0.0;
                 for &source_idx in &clusters[i] {
                     for &target_idx in &clusters[j] {
-                        let source_start = candidates[source_idx].chunk.start_token as isize;
-                        let target_start = candidates[target_idx].chunk.start_token as isize;
-                        let distance = (source_start - target_start).abs() as usize;
+                        let source_start = candidates[source_idx].chunk.start_token;
+                        let target_start = candidates[target_idx].chunk.start_token;
+                        let distance = source_start.abs_diff(target_start);
                         if distance > 0 {
                             weight += 1.0 / distance as f64;
                         }
@@ -439,8 +439,10 @@ mod tests {
             Token::new("Deep", "deep", PosTag::Adjective, 0, 4, 0, 0),
             Token::new("learning", "learning", PosTag::Noun, 5, 13, 0, 1),
         ];
-        let mut config = TextRankConfig::default();
-        config.include_pos = vec![PosTag::Noun];
+        let config = TextRankConfig {
+            include_pos: vec![PosTag::Noun],
+            ..Default::default()
+        };
         let phrases = extract_keyphrases_topic(&tokens, &config);
         assert_eq!(phrases.len(), 1);
         assert_eq!(phrases[0].text, "learning");

@@ -384,11 +384,19 @@ pub enum PhraseGrouping {
 }
 
 impl PhraseGrouping {
-    pub fn from_str(value: &str) -> Self {
+    fn parse(value: &str) -> Self {
         match value.to_lowercase().as_str() {
             "scrubbed" | "scrubbed_text" | "text" => PhraseGrouping::ScrubbedText,
             _ => PhraseGrouping::Lemma,
         }
+    }
+}
+
+impl std::str::FromStr for PhraseGrouping {
+    type Err = std::convert::Infallible;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(PhraseGrouping::parse(value))
     }
 }
 
