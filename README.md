@@ -11,7 +11,7 @@ Extract keywords and key phrases from text up to 10-100x faster than pure Python
 ## Features
 
 - **Fast**: Up to 10-100x faster than pure Python implementations (see benchmarks)
-- **Multiple algorithms**: TextRank, PositionRank, BiasedTextRank, TopicRank, SingleRank, and TopicalPageRank variants
+- **Multiple algorithms**: TextRank, PositionRank, BiasedTextRank, TopicRank, SingleRank, TopicalPageRank, and MultipartiteRank variants
 - **Unicode-aware**: Proper handling of CJK and other scripts (emoji are ignored by the built-in tokenizer)
 - **Multi-language**: Stopword support for 18 languages
 - **Dual API**: Native Python classes + JSON interface for batch processing
@@ -81,6 +81,7 @@ Co-occurrence graph (window=2):
 - [TopicRank: Graph-Based Topic Ranking for Keyphrase Extraction](https://aclanthology.org/I13-1062/) (Bougouin et al., 2013)
 - [SingleRank: Single Document Keyphrase Extraction Using Neighborhood Knowledge](https://ojs.aaai.org/index.php/AAAI/article/view/7798) (Wan & Xiao, 2008)
 - [Topical Word Importance for Fast Keyphrase Extraction](https://aclanthology.org/W15-3605/) (Sterckx et al., 2015)
+- [MultipartiteRank: Unsupervised Keyphrase Extraction with Multipartite Graphs](https://aclanthology.org/N18-2105/) (Boudin, 2018)
 
 ## Algorithm Variants
 
@@ -92,6 +93,7 @@ Co-occurrence graph (window=2):
 | `TopicRank` | Multi-topic documents | Clusters similar phrases into topics and ranks the topics |
 | `SingleRank` | Longer documents | Uses weighted co-occurrence edges and cross-sentence windowing |
 | `TopicalPageRank` | Topic-model-guided extraction | Biases SingleRank towards topically important words via personalized PageRank |
+| `MultipartiteRank` | Multi-topic documents | Builds a k-partite graph removing intra-topic edges; boosts first-occurring variants |
 
 ### PositionRank
 
@@ -292,6 +294,52 @@ for phrase in result.phrases:
 
 **Topic modeling is optional.** You can supply any word-importance scores: TF-IDF weights, embedding similarities, domain relevance scores, or hand-picked values.
 
+### MultipartiteRank
+
+MultipartiteRank (Boudin, NAACL 2018) extends TopicRank by keeping individual candidates as graph nodes instead of collapsing topics into single representatives. It removes intra-topic edges to form a k-partite graph and applies an alpha weight adjustment that boosts the first-occurring variant in each topic cluster, encoding positional preference directly into edge weights.
+
+```python
+from rapid_textrank import MultipartiteRank
+
+extractor = MultipartiteRank(
+    similarity_threshold=0.26,  # Jaccard threshold for topic clustering
+    alpha=1.1,                  # Position boost strength (0 = disabled)
+    top_n=10
+)
+
+result = extractor.extract_keywords("""
+Machine learning is a powerful tool for data analysis. Deep learning
+is a subset of machine learning. Neural networks power deep learning
+systems. Convolutional neural networks excel at image recognition.
+""")
+
+for phrase in result.phrases:
+    print(f"{phrase.text}: {phrase.score:.4f}")
+```
+
+MultipartiteRank is also available via the JSON interface with `variant="multipartite_rank"` (aliases: `"multipartiterank"`, `"multipartite"`, `"mpr"`). Set `multipartite_alpha` and `multipartite_similarity_threshold` in the JSON config:
+
+```python
+import json
+from rapid_textrank import extract_from_json
+
+payload = {
+    "tokens": tokens,  # Pre-tokenized (e.g., from spaCy)
+    "variant": "multipartite_rank",
+    "config": {
+        "top_n": 10,
+        "multipartite_alpha": 1.1,
+        "multipartite_similarity_threshold": 0.26,
+    },
+}
+
+result = json.loads(extract_from_json(json.dumps(payload)))
+```
+
+**MultipartiteRank vs TopicRank:** Both cluster candidates into topics, but they differ in graph construction:
+- **TopicRank** collapses each topic into a single node and ranks topics as a whole, then picks the best representative from each.
+- **MultipartiteRank** keeps every candidate as its own node but removes edges within the same topic. This preserves fine-grained candidate distinctions while still preventing intra-topic competition.
+
 ## API Reference
 
 ### Convenience Function
@@ -313,7 +361,7 @@ phrases = extract_keywords(
 For more control, use the extractor classes:
 
 ```python
-from rapid_textrank import BaseTextRank, PositionRank, BiasedTextRank, SingleRank, TopicalPageRank
+from rapid_textrank import BaseTextRank, PositionRank, BiasedTextRank, SingleRank, TopicalPageRank, MultipartiteRank
 
 # Standard TextRank
 extractor = BaseTextRank(top_n=10, language="en")
@@ -343,6 +391,15 @@ result = extractor.extract_keywords(text)
 extractor = TopicalPageRank(
     topic_weights={"neural": 0.9, "network": 0.8},
     min_weight=0.01,
+    top_n=10,
+    language="en"
+)
+result = extractor.extract_keywords(text)
+
+# MultipartiteRank: k-partite graph with position boost
+extractor = MultipartiteRank(
+    similarity_threshold=0.26,
+    alpha=1.1,
     top_n=10,
     language="en"
 )
@@ -439,7 +496,7 @@ results_json = extract_batch_from_json(json.dumps(docs))
 results = json.loads(results_json)
 ```
 
-`variant` can be `"textrank"` (default), `"position_rank"`, `"biased_textrank"`, `"topic_rank"`, `"single_rank"`, or `"topical_pagerank"` (aliases: `"tpr"`, `"single_tpr"`). For `"biased_textrank"`, set `focus_terms` and `bias_weight` in the JSON config. For `"topic_rank"`, set `topic_similarity_threshold` and `topic_edge_weight` in the JSON config. For `"topical_pagerank"`, set `topic_weights` and optionally `topic_min_weight` in the JSON config.
+`variant` can be `"textrank"` (default), `"position_rank"`, `"biased_textrank"`, `"topic_rank"`, `"single_rank"`, `"topical_pagerank"` (aliases: `"tpr"`, `"single_tpr"`), or `"multipartite_rank"` (aliases: `"multipartiterank"`, `"multipartite"`, `"mpr"`). For `"biased_textrank"`, set `focus_terms` and `bias_weight` in the JSON config. For `"topic_rank"`, set `topic_similarity_threshold` and `topic_edge_weight` in the JSON config. For `"topical_pagerank"`, set `topic_weights` and optionally `topic_min_weight` in the JSON config. For `"multipartite_rank"`, set `multipartite_alpha` and `multipartite_similarity_threshold` in the JSON config.
 
 ## Supported Languages
 
@@ -782,6 +839,18 @@ For TopicRank:
     year = "2013",
     pages = "543--551",
     publisher = "Asian Federation of Natural Language Processing",
+}
+```
+
+For MultipartiteRank:
+
+```bibtex
+@inproceedings{boudin-2018-multipartiterank,
+    title = "Unsupervised Keyphrase Extraction with Multipartite Graphs",
+    author = "Boudin, Florian",
+    booktitle = "Proceedings of the 2018 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies (NAACL-HLT 2018)",
+    year = "2018",
+    pages = "667--672",
 }
 ```
 
