@@ -316,4 +316,218 @@ mod tests {
         let phrases = extract_keyphrases_topical(&tokens, &config, weights, 0.0);
         assert!(!phrases.is_empty());
     }
+
+    #[test]
+    fn test_deterministic_output() {
+        let tokens = sample_tokens();
+        let mut weights = HashMap::new();
+        weights.insert("machine".to_string(), 0.8);
+        weights.insert("neural".to_string(), 0.5);
+
+        let config = TextRankConfig::default().with_top_n(10);
+        let tpr = TopicalPageRank::with_config(config)
+            .with_topic_weights(weights);
+
+        let result_a = tpr.extract_with_info(&tokens);
+        let result_b = tpr.extract_with_info(&tokens);
+
+        assert_eq!(result_a.phrases.len(), result_b.phrases.len());
+        for (a, b) in result_a.phrases.iter().zip(result_b.phrases.iter()) {
+            assert_eq!(a.lemma, b.lemma);
+            assert!((a.score - b.score).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn test_scores_positive_and_sorted() {
+        let tokens = sample_tokens();
+        let mut weights = HashMap::new();
+        weights.insert("machine".to_string(), 0.8);
+        weights.insert("learning".to_string(), 0.6);
+
+        let config = TextRankConfig::default().with_top_n(10);
+        let result = TopicalPageRank::with_config(config)
+            .with_topic_weights(weights)
+            .extract_with_info(&tokens);
+
+        assert!(!result.phrases.is_empty());
+        for phrase in &result.phrases {
+            assert!(phrase.score > 0.0, "score must be positive: {}", phrase.lemma);
+        }
+        // Phrases should be sorted by descending score
+        for pair in result.phrases.windows(2) {
+            assert!(
+                pair[0].score >= pair[1].score,
+                "phrases not sorted: {} ({}) >= {} ({})",
+                pair[0].lemma, pair[0].score, pair[1].lemma, pair[1].score
+            );
+        }
+    }
+
+    #[test]
+    fn test_proportional_weights_produce_same_ranking() {
+        // Weights that differ only by a constant factor should produce identical
+        // rankings because PersonalizedPageRank normalizes internally.
+        let tokens = sample_tokens();
+        let config = TextRankConfig::default().with_top_n(10);
+
+        let small: HashMap<String, f64> = [
+            ("machine", 0.1),
+            ("learning", 0.2),
+            ("neural", 0.3),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), *v))
+        .collect();
+
+        let large: HashMap<String, f64> = small
+            .iter()
+            .map(|(k, v)| (k.clone(), v * 1000.0))
+            .collect();
+
+        let result_small = TopicalPageRank::with_config(config.clone())
+            .with_topic_weights(small)
+            .extract_with_info(&tokens);
+
+        let result_large = TopicalPageRank::with_config(config)
+            .with_topic_weights(large)
+            .extract_with_info(&tokens);
+
+        assert_eq!(result_small.phrases.len(), result_large.phrases.len());
+        for (s, l) in result_small.phrases.iter().zip(result_large.phrases.iter()) {
+            assert_eq!(
+                s.lemma, l.lemma,
+                "ranking order differs: '{}' vs '{}'",
+                s.lemma, l.lemma
+            );
+            assert!(
+                (s.score - l.score).abs() < 1e-6,
+                "scores differ for '{}': {} vs {}",
+                s.lemma, s.score, l.score
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_oov_min_weight_zero_still_extracts() {
+        // All topic weights are for unknown lemmas and min_weight = 0.
+        // The personalization vector is all-zero, so PPR falls back to uniform.
+        let tokens = sample_tokens();
+        let config = TextRankConfig::default().with_top_n(5);
+
+        let mut weights = HashMap::new();
+        weights.insert("nonexistent_word".to_string(), 5.0);
+
+        let result = TopicalPageRank::with_config(config)
+            .with_topic_weights(weights)
+            .with_min_weight(0.0)
+            .extract_with_info(&tokens);
+
+        // Should still produce phrases (uniform fallback)
+        assert!(!result.phrases.is_empty());
+        assert!(result.converged);
+    }
+
+    #[test]
+    fn test_deterministic_toy_ordering() {
+        // Minimal document: two "sentences" with different topics.
+        // We strongly bias towards "neural" and "network" so phrases
+        // containing those lemmas should rank at the top.
+        let tokens = vec![
+            make_token("Machine", "machine", PosTag::Noun, 0, 0),
+            make_token("learning", "learning", PosTag::Noun, 0, 1),
+            make_token("uses", "use", PosTag::Verb, 0, 2),
+            make_token("neural", "neural", PosTag::Adjective, 0, 3),
+            make_token("networks", "network", PosTag::Noun, 0, 4),
+            make_token("Neural", "neural", PosTag::Adjective, 1, 5),
+            make_token("networks", "network", PosTag::Noun, 1, 6),
+            make_token("require", "require", PosTag::Verb, 1, 7),
+            make_token("deep", "deep", PosTag::Adjective, 1, 8),
+            make_token("learning", "learning", PosTag::Noun, 1, 9),
+        ];
+
+        let mut weights = HashMap::new();
+        weights.insert("neural".to_string(), 100.0);
+        weights.insert("network".to_string(), 100.0);
+        // All other words get min_weight = 0
+
+        let config = TextRankConfig::default().with_top_n(5);
+        let result = TopicalPageRank::with_config(config)
+            .with_topic_weights(weights)
+            .with_min_weight(0.0)
+            .extract_with_info(&tokens);
+
+        assert!(!result.phrases.is_empty());
+        // The top phrase must contain "neural" or "network"
+        let top = &result.phrases[0];
+        assert!(
+            top.lemma.contains("neural") || top.lemma.contains("network"),
+            "expected top phrase to contain 'neural' or 'network', got: '{}'",
+            top.lemma
+        );
+    }
+
+    #[test]
+    fn test_use_pos_in_nodes_with_topic_weights() {
+        // When use_pos_in_nodes=true (default), the graph keys are "lemma|POS".
+        // Verify that topic weights (keyed by plain lemma) still apply
+        // correctly by expanding across POS tags.
+        let tokens = sample_tokens();
+
+        let mut weights = HashMap::new();
+        weights.insert("deep".to_string(), 50.0);
+        weights.insert("network".to_string(), 50.0);
+
+        // use_pos_in_nodes=true is the default
+        let config_pos = TextRankConfig::default().with_top_n(10);
+        assert!(config_pos.use_pos_in_nodes); // confirm default
+        let result_pos = TopicalPageRank::with_config(config_pos)
+            .with_topic_weights(weights.clone())
+            .extract_with_info(&tokens);
+
+        let mut config_no_pos = TextRankConfig::default().with_top_n(10);
+        config_no_pos.use_pos_in_nodes = false;
+        let result_no_pos = TopicalPageRank::with_config(config_no_pos)
+            .with_topic_weights(weights)
+            .extract_with_info(&tokens);
+
+        // Both should produce non-empty, convergent results
+        assert!(!result_pos.phrases.is_empty());
+        assert!(!result_no_pos.phrases.is_empty());
+        assert!(result_pos.converged);
+        assert!(result_no_pos.converged);
+
+        // In both modes, biased lemmas should appear in the results
+        let pos_lemmas: Vec<&str> = result_pos.phrases.iter().map(|p| p.lemma.as_str()).collect();
+        assert!(
+            pos_lemmas.iter().any(|l| l.contains("deep") || l.contains("network")),
+            "POS mode: expected biased lemmas in results, got: {:?}",
+            pos_lemmas
+        );
+    }
+
+    #[test]
+    fn test_single_word_topic_weight_dominates() {
+        // Give one word an enormous weight while all others get 0.
+        // That word's phrases should dominate the top results.
+        let tokens = sample_tokens();
+        let config = TextRankConfig::default().with_top_n(10);
+
+        let mut weights = HashMap::new();
+        weights.insert("intelligence".to_string(), 1000.0);
+
+        let result = TopicalPageRank::with_config(config)
+            .with_topic_weights(weights)
+            .with_min_weight(0.0)
+            .extract_with_info(&tokens);
+
+        assert!(!result.phrases.is_empty());
+        // The top phrase should contain "intelligence"
+        let top = &result.phrases[0];
+        assert!(
+            top.lemma.contains("intelligence"),
+            "expected 'intelligence' as top phrase, got: '{}'",
+            top.lemma
+        );
+    }
 }

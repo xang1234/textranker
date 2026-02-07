@@ -1,6 +1,7 @@
 //! Integration tests for rapid_textrank
 
 use rapid_textrank::*;
+use std::collections::HashMap;
 
 /// Sample text for testing
 const SAMPLE_TEXT: &str = r#"
@@ -291,5 +292,46 @@ fn test_parallel_graph_building() {
         "Node counts differ too much: seq={}, par={}",
         seq_count,
         par_count
+    );
+}
+
+#[test]
+fn test_topical_pagerank_pipeline() {
+    let tokenizer = nlp::tokenizer::Tokenizer::new();
+    let (_, mut tokens) = tokenizer.tokenize(SAMPLE_TEXT);
+
+    let stopwords = nlp::stopwords::StopwordFilter::new("en");
+    for token in &mut tokens {
+        token.is_stopword = stopwords.is_stopword(&token.text);
+    }
+
+    // Bias towards "neural" and "deep" topics
+    let mut topic_weights = HashMap::new();
+    topic_weights.insert("neural".to_string(), 5.0);
+    topic_weights.insert("deep".to_string(), 5.0);
+    topic_weights.insert("network".to_string(), 3.0);
+
+    let config = TextRankConfig::default().with_top_n(10);
+    let result = variants::topical_pagerank::TopicalPageRank::with_config(config)
+        .with_topic_weights(topic_weights)
+        .with_min_weight(0.1)
+        .extract_with_info(&tokens);
+
+    assert!(!result.phrases.is_empty());
+    assert!(result.converged);
+
+    // Verify phrase properties
+    for (i, phrase) in result.phrases.iter().enumerate() {
+        assert_eq!(phrase.rank, i + 1);
+        assert!(phrase.score > 0.0);
+        assert!(!phrase.text.is_empty());
+    }
+
+    // Biased lemmas should appear in the top results
+    let top_lemmas: Vec<&str> = result.phrases.iter().take(5).map(|p| p.lemma.as_str()).collect();
+    assert!(
+        top_lemmas.iter().any(|l| l.contains("neural") || l.contains("deep") || l.contains("network")),
+        "Expected biased lemmas in top-5 phrases, got: {:?}",
+        top_lemmas
     );
 }
