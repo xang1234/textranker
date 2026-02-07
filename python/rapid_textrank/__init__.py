@@ -33,7 +33,19 @@ __all__ = [
     "extract_from_json",
     "extract_batch_from_json",
     "get_stopwords",
+    "topic_weights_from_lda",
 ]
+
+
+def topic_weights_from_lda(*args, **kwargs):
+    """Compute per-lemma topic weights from a Gensim LDA model.
+
+    This is a lazy wrapper that avoids importing gensim at module load time.
+    See :func:`rapid_textrank.topic_utils.topic_weights_from_lda` for full docs.
+    """
+    from rapid_textrank.topic_utils import topic_weights_from_lda as _impl
+
+    return _impl(*args, **kwargs)
 
 
 def extract_keywords(text: str, top_n: int = 10, language: str = "en") -> list:

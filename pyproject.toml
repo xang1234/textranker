@@ -38,8 +38,9 @@ Repository = "https://github.com/xang1234/rapid-textrank"
 Issues = "https://github.com/xang1234/rapid-textrank/issues"
 
 [project.optional-dependencies]
+topic = ["gensim>=4.0"]
 spacy = ["spacy>=3.0"]
-dev = ["pytest>=7.0", "pytest-benchmark", "spacy>=3.0"]
+dev = ["pytest>=7.0", "pytest-benchmark", "spacy>=3.0", "gensim>=4.0"]
 
 [tool.maturin]
 features = ["python"]
