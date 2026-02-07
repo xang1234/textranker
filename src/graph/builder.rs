@@ -92,6 +92,19 @@ impl GraphBuilder {
         }
     }
 
+    /// Increment a directed edge weight (from -> to only, no reverse edge).
+    ///
+    /// Used by MultipartiteRank where the alpha adjustment makes edges
+    /// asymmetric.
+    pub fn increment_directed_edge(&mut self, from: u32, to: u32, weight: f64) {
+        if from == to {
+            return;
+        }
+        if let Some(node) = self.nodes.get_mut(from as usize) {
+            *node.edges.entry(to).or_insert(0.0) += weight;
+        }
+    }
+
     /// Set the edge weight between two nodes (binary/unweighted mode)
     ///
     /// If the edge doesn't exist, it's created with the given weight.

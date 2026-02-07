@@ -6,6 +6,7 @@
 use crate::phrase::extraction::extract_keyphrases_with_info;
 use crate::types::{PhraseGrouping, PosTag, ScoreAggregation, TextRankConfig, Token};
 use crate::variants::biased_textrank::BiasedTextRank;
+use crate::variants::multipartite_rank::MultipartiteRank;
 use crate::variants::position_rank::PositionRank;
 use crate::variants::single_rank::SingleRank;
 use crate::variants::topic_rank::TopicRank;
@@ -101,6 +102,12 @@ pub struct JsonConfig {
     /// Minimum weight for OOV words in Topical PageRank (default 0.0)
     #[serde(default)]
     pub topic_min_weight: f64,
+    /// Alpha weight adjustment for MultipartiteRank (default 1.1)
+    #[serde(default = "default_multipartite_alpha")]
+    pub multipartite_alpha: f64,
+    /// Similarity threshold for MultipartiteRank clustering (default 0.26)
+    #[serde(default = "default_multipartite_similarity_threshold")]
+    pub multipartite_similarity_threshold: f64,
 }
 
 fn default_use_edge_weights() -> bool {
@@ -147,6 +154,14 @@ fn default_topic_edge_weight() -> f64 {
     1.0
 }
 
+fn default_multipartite_alpha() -> f64 {
+    1.1
+}
+
+fn default_multipartite_similarity_threshold() -> f64 {
+    0.26
+}
+
 impl Default for JsonConfig {
     fn default() -> Self {
         Self {
@@ -170,6 +185,8 @@ impl Default for JsonConfig {
             topic_edge_weight: default_topic_edge_weight(),
             topic_weights: HashMap::new(),
             topic_min_weight: 0.0,
+            multipartite_alpha: default_multipartite_alpha(),
+            multipartite_similarity_threshold: default_multipartite_similarity_threshold(),
         }
     }
 }
@@ -244,6 +261,10 @@ fn extract_with_variant(
         Variant::TopicalPageRank => TopicalPageRank::with_config(config.clone())
             .with_topic_weights(json_config.topic_weights.clone())
             .with_min_weight(json_config.topic_min_weight)
+            .extract_with_info(tokens),
+        Variant::MultipartiteRank => MultipartiteRank::with_config(config.clone())
+            .with_similarity_threshold(json_config.multipartite_similarity_threshold)
+            .with_alpha(json_config.multipartite_alpha)
             .extract_with_info(tokens),
     }
 }

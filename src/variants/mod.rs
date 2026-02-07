@@ -8,6 +8,7 @@
 //! - TopicalPageRank: SingleRank graph + topic-weight-biased personalized PageRank
 
 pub mod biased_textrank;
+pub mod multipartite_rank;
 pub mod position_rank;
 pub mod single_rank;
 pub mod topic_rank;
@@ -21,6 +22,7 @@ pub enum Variant {
     TopicRank,
     SingleRank,
     TopicalPageRank,
+    MultipartiteRank,
 }
 
 impl Variant {
@@ -33,6 +35,9 @@ impl Variant {
             "single_rank" | "singlerank" | "single" => Variant::SingleRank,
             "topical_pagerank" | "topicalpagerank" | "single_tpr" | "tpr" => {
                 Variant::TopicalPageRank
+            }
+            "multipartite_rank" | "multipartiterank" | "multipartite" | "mpr" => {
+                Variant::MultipartiteRank
             }
             _ => Variant::TextRank,
         }

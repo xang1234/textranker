@@ -8,6 +8,7 @@ use crate::nlp::tokenizer::Tokenizer;
 use crate::phrase::extraction::extract_keyphrases_with_info;
 use crate::types::{Phrase, PhraseGrouping, ScoreAggregation, TextRankConfig};
 use crate::variants::biased_textrank::BiasedTextRank;
+use crate::variants::multipartite_rank::MultipartiteRank;
 use crate::variants::position_rank::PositionRank;
 use crate::variants::single_rank::SingleRank;
 use crate::variants::topical_pagerank::TopicalPageRank;
@@ -575,6 +576,81 @@ impl PyTopicalPageRank {
             self.topic_weights.len(),
             self.min_weight,
             self.config.top_n
+        )
+    }
+}
+
+/// MultipartiteRank keyword extractor
+///
+/// Builds a k-partite directed graph where candidates from different
+/// topic clusters are connected. An alpha adjustment boosts the
+/// first-occurring variant in each topic.
+#[pyclass(name = "MultipartiteRank")]
+pub struct PyMultipartiteRank {
+    config: TextRankConfig,
+    similarity_threshold: f64,
+    alpha: f64,
+}
+
+#[pymethods]
+impl PyMultipartiteRank {
+    #[new]
+    #[pyo3(signature = (similarity_threshold=0.26, alpha=1.1, config=None, top_n=None, language=None))]
+    fn new(
+        similarity_threshold: f64,
+        alpha: f64,
+        config: Option<PyTextRankConfig>,
+        top_n: Option<usize>,
+        language: Option<&str>,
+    ) -> PyResult<Self> {
+        let mut inner_config = config.map(|c| c.inner).unwrap_or_default();
+
+        if let Some(n) = top_n {
+            inner_config.top_n = n;
+        }
+        if let Some(lang) = language {
+            inner_config.language = lang.to_string();
+        }
+
+        Ok(Self {
+            config: inner_config,
+            similarity_threshold,
+            alpha,
+        })
+    }
+
+    /// Extract keywords using MultipartiteRank
+    #[pyo3(signature = (text))]
+    fn extract_keywords(&self, text: &str) -> PyResult<PyTextRankResult> {
+        let tokenizer = Tokenizer::new();
+        let (_, mut tokens) = tokenizer.tokenize(text);
+
+        let stopwords = if self.config.stopwords.is_empty() {
+            StopwordFilter::new(&self.config.language)
+        } else {
+            StopwordFilter::with_additional(&self.config.language, &self.config.stopwords)
+        };
+        for token in &mut tokens {
+            token.is_stopword = stopwords.is_stopword(&token.text);
+        }
+
+        let extractor = MultipartiteRank::with_config(self.config.clone())
+            .with_similarity_threshold(self.similarity_threshold)
+            .with_alpha(self.alpha);
+
+        let result = extractor.extract_with_info(&tokens);
+
+        Ok(PyTextRankResult {
+            phrases: result.phrases.into_iter().map(PyPhrase::from).collect(),
+            converged: result.converged,
+            iterations: result.iterations,
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "MultipartiteRank(alpha={}, similarity_threshold={}, top_n={})",
+            self.alpha, self.similarity_threshold, self.config.top_n
         )
     }
 }

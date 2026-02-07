@@ -12,6 +12,7 @@
 //! - **Flexible**: Multiple algorithm variants and configuration options
 //! - **Python bindings**: Seamless integration with Python via PyO3
 
+pub mod clustering;
 pub mod errors;
 pub mod graph;
 pub mod nlp;
@@ -39,8 +40,8 @@ pub use pagerank::{
 pub use phrase::extraction::PhraseExtractor;
 pub use summarizer::selector::SentenceSelector;
 pub use variants::{
-    biased_textrank::BiasedTextRank, position_rank::PositionRank, single_rank::SingleRank,
-    topical_pagerank::TopicalPageRank,
+    biased_textrank::BiasedTextRank, multipartite_rank::MultipartiteRank,
+    position_rank::PositionRank, single_rank::SingleRank, topical_pagerank::TopicalPageRank,
 };
 
 /// Library version

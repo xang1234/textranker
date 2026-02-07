@@ -11,13 +11,12 @@
 //! 4. Run PageRank on the cluster graph
 //! 5. Select the first occurring phrase from each top cluster
 
+use crate::clustering::{self, compute_gap, extract_candidates, PhraseCandidate};
 use crate::graph::builder::GraphBuilder;
 use crate::graph::csr::CsrGraph;
 use crate::pagerank::standard::StandardPageRank;
-use crate::phrase::chunker::{chunk_lemma, chunk_text, NounChunker};
 use crate::phrase::extraction::ExtractionResult;
 use crate::types::{Phrase, TextRankConfig, Token};
-use rustc_hash::FxHashSet;
 
 /// TopicRank implementation
 #[derive(Debug)]
@@ -76,42 +75,6 @@ impl TopicRank {
         self
     }
 
-    fn is_kept_token(&self, token: &Token) -> bool {
-        if token.is_stopword {
-            return false;
-        }
-        if self.config.include_pos.is_empty() {
-            token.pos.is_content_word()
-        } else {
-            self.config.include_pos.contains(&token.pos)
-        }
-    }
-
-    fn trim_chunk_to_first_kept(
-        &self,
-        tokens: &[Token],
-        chunk: &crate::types::ChunkSpan,
-    ) -> Option<crate::types::ChunkSpan> {
-        let mut start = chunk.start_token;
-        let end = chunk.end_token;
-
-        while start < end && !self.is_kept_token(&tokens[start]) {
-            start += 1;
-        }
-
-        if start >= end {
-            return None;
-        }
-
-        Some(crate::types::ChunkSpan {
-            start_token: start,
-            end_token: end,
-            start_char: tokens[start].start,
-            end_char: tokens[end - 1].end,
-            sentence_idx: tokens[start].sentence_idx,
-        })
-    }
-
     /// Extract keyphrases using TopicRank
     pub fn extract(&self, tokens: &[Token]) -> Vec<Phrase> {
         self.extract_with_info(tokens).phrases
@@ -120,40 +83,13 @@ impl TopicRank {
     /// Extract keyphrases with PageRank convergence information
     pub fn extract_with_info(&self, tokens: &[Token]) -> ExtractionResult {
         // Extract candidate phrases
-        let chunker = NounChunker::new()
-            .with_min_length(self.config.min_phrase_length)
-            .with_max_length(self.config.max_phrase_length);
-        let chunks = chunker.extract_chunks(tokens);
-
-        if chunks.is_empty() {
-            return ExtractionResult {
-                phrases: Vec::new(),
-                converged: true,
-                iterations: 0,
-            };
-        }
-
-        // Create phrase candidates
-        let mut candidates: Vec<PhraseCandidate> = Vec::new();
-        for chunk in chunks.iter().take(self.max_phrases) {
-            let trimmed = match self.trim_chunk_to_first_kept(tokens, chunk) {
-                Some(span) => span,
-                None => continue,
-            };
-            let text = chunk_text(tokens, &trimmed);
-            let lemma = chunk_lemma(tokens, &trimmed);
-            let terms: FxHashSet<String> = tokens[trimmed.start_token..trimmed.end_token]
-                .iter()
-                .filter(|t| !t.is_stopword)
-                .map(|t| t.text.clone())
-                .collect();
-            candidates.push(PhraseCandidate {
-                text,
-                lemma,
-                terms,
-                chunk: trimmed,
-            });
-        }
+        let candidates = extract_candidates(
+            tokens,
+            self.config.min_phrase_length,
+            self.config.max_phrase_length,
+            self.max_phrases,
+            &self.config.include_pos,
+        );
 
         if candidates.is_empty() {
             return ExtractionResult {
@@ -164,7 +100,7 @@ impl TopicRank {
         }
 
         // Cluster similar phrases
-        let clusters = self.cluster_phrases(&candidates);
+        let clusters = clustering::cluster_phrases(&candidates, self.similarity_threshold);
 
         if clusters.is_empty() {
             return ExtractionResult {
@@ -205,59 +141,6 @@ impl TopicRank {
             converged: pagerank.converged,
             iterations: pagerank.iterations,
         }
-    }
-
-    /// Cluster phrases using HAC (average linkage) over Jaccard distance
-    fn cluster_phrases(&self, candidates: &[PhraseCandidate]) -> Vec<Vec<usize>> {
-        let n = candidates.len();
-        if n == 0 {
-            return Vec::new();
-        }
-        if n == 1 {
-            return vec![vec![0]];
-        }
-
-        let mut base_dist = vec![vec![0.0; n]; n];
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let dist = jaccard_distance(&candidates[i].terms, &candidates[j].terms);
-                base_dist[i][j] = dist;
-                base_dist[j][i] = dist;
-            }
-        }
-
-        let cutoff = (0.99 - self.similarity_threshold).clamp(0.0, 1.0);
-        let mut clusters: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
-
-        loop {
-            if clusters.len() <= 1 {
-                break;
-            }
-
-            let mut best_i = 0;
-            let mut best_j = 0;
-            let mut best_dist = f64::INFINITY;
-
-            for i in 0..clusters.len() {
-                for j in (i + 1)..clusters.len() {
-                    let dist = average_linkage_distance(&base_dist, &clusters[i], &clusters[j]);
-                    if dist < best_dist {
-                        best_dist = dist;
-                        best_i = i;
-                        best_j = j;
-                    }
-                }
-            }
-
-            if best_dist > cutoff {
-                break;
-            }
-
-            let mut merged = clusters.remove(best_j);
-            clusters[best_i].append(&mut merged);
-        }
-
-        clusters
     }
 
     /// Build a graph where nodes are clusters and edges connect co-occurring clusters
@@ -342,66 +225,6 @@ impl TopicRank {
     }
 }
 
-/// Compute PKE-style positional gap between two chunks.
-/// Measures distance from the end of the earlier phrase to the start of the later,
-/// floored at 1 to avoid division by zero.
-fn compute_gap(a: &crate::types::ChunkSpan, b: &crate::types::ChunkSpan) -> usize {
-    let raw = a.start_token.abs_diff(b.start_token);
-    let span_adjust = if a.start_token < b.start_token {
-        (a.end_token - a.start_token).saturating_sub(1)
-    } else if a.start_token > b.start_token {
-        (b.end_token - b.start_token).saturating_sub(1)
-    } else {
-        0
-    };
-    raw.saturating_sub(span_adjust).max(1)
-}
-
-/// A phrase candidate with its stems for clustering
-#[derive(Debug)]
-struct PhraseCandidate {
-    text: String,
-    lemma: String,
-    terms: FxHashSet<String>,
-    chunk: crate::types::ChunkSpan,
-}
-
-/// Jaccard distance between two sets
-fn jaccard_distance(a: &FxHashSet<String>, b: &FxHashSet<String>) -> f64 {
-    if a.is_empty() && b.is_empty() {
-        return 0.0;
-    }
-    let intersection = a.intersection(b).count();
-    let union = a.union(b).count();
-    if union == 0 {
-        1.0
-    } else {
-        1.0 - (intersection as f64 / union as f64)
-    }
-}
-
-fn average_linkage_distance(
-    base_dist: &[Vec<f64>],
-    cluster_a: &[usize],
-    cluster_b: &[usize],
-) -> f64 {
-    let mut sum = 0.0;
-    let mut count = 0usize;
-
-    for &i in cluster_a {
-        for &j in cluster_b {
-            sum += base_dist[i][j];
-            count += 1;
-        }
-    }
-
-    if count == 0 {
-        0.0
-    } else {
-        sum / count as f64
-    }
-}
-
 /// Convenience function
 pub fn extract_keyphrases_topic(tokens: &[Token], config: &TextRankConfig) -> Vec<Phrase> {
     TopicRank::with_config(config.clone()).extract(tokens)
@@ -410,7 +233,8 @@ pub fn extract_keyphrases_topic(tokens: &[Token], config: &TextRankConfig) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::PosTag;
+    use crate::clustering::{jaccard_distance, PhraseCandidate};
+    use crate::types::{ChunkSpan, PosTag};
 
     fn make_tokens() -> Vec<Token> {
         vec![
@@ -436,6 +260,7 @@ mod tests {
 
     #[test]
     fn test_jaccard_distance() {
+        use rustc_hash::FxHashSet;
         let a: FxHashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
         let b: FxHashSet<String> = ["b", "c", "d"].iter().map(|s| s.to_string()).collect();
 
@@ -447,6 +272,7 @@ mod tests {
 
     #[test]
     fn test_jaccard_distance_identical() {
+        use rustc_hash::FxHashSet;
         let a: FxHashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
         let dist = jaccard_distance(&a, &a);
         assert!((dist - 0.0).abs() < 1e-6);
@@ -454,6 +280,7 @@ mod tests {
 
     #[test]
     fn test_jaccard_distance_disjoint() {
+        use rustc_hash::FxHashSet;
         let a: FxHashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
         let b: FxHashSet<String> = ["c", "d"].iter().map(|s| s.to_string()).collect();
         let dist = jaccard_distance(&a, &b);
@@ -502,8 +329,6 @@ mod tests {
 
     #[test]
     fn test_hac_clustering_thresholds() {
-        use crate::types::ChunkSpan;
-
         fn make_candidate(terms: &[&str], start_token: usize) -> PhraseCandidate {
             PhraseCandidate {
                 text: terms.join(" "),
@@ -519,8 +344,6 @@ mod tests {
             }
         }
 
-        let topic_rank = TopicRank::new().with_similarity_threshold(0.25);
-
         // Disjoint candidates stay separate (distance 1.0 > 0.74)
         {
             let candidates = vec![
@@ -528,7 +351,7 @@ mod tests {
                 make_candidate(&["c", "d"], 1),
                 make_candidate(&["e", "f"], 2),
             ];
-            let clusters = topic_rank.cluster_phrases(&candidates);
+            let clusters = clustering::cluster_phrases(&candidates, 0.25);
             assert_eq!(clusters.len(), 3);
         }
 
@@ -538,7 +361,7 @@ mod tests {
                 make_candidate(&["a", "b"], 0),
                 make_candidate(&["a", "b"], 1),
             ];
-            let clusters = topic_rank.cluster_phrases(&candidates);
+            let clusters = clustering::cluster_phrases(&candidates, 0.25);
             assert_eq!(clusters.len(), 1);
         }
 
@@ -549,7 +372,7 @@ mod tests {
                 make_candidate(&["a", "b", "c"], 1),
                 make_candidate(&["x", "y", "z"], 2),
             ];
-            let clusters = topic_rank.cluster_phrases(&candidates);
+            let clusters = clustering::cluster_phrases(&candidates, 0.25);
             assert_eq!(clusters.len(), 2);
         }
 
@@ -560,7 +383,7 @@ mod tests {
                 make_candidate(&["a", "b", "c"], 1),
                 make_candidate(&["c", "d"], 2),
             ];
-            let clusters = topic_rank.cluster_phrases(&candidates);
+            let clusters = clustering::cluster_phrases(&candidates, 0.25);
             assert_eq!(clusters.len(), 2);
         }
 
@@ -570,15 +393,13 @@ mod tests {
                 make_candidate(&["a", "b", "c", "d", "e"], 0),
                 make_candidate(&["a", "x", "y", "z", "w"], 1),
             ];
-            let clusters = topic_rank.cluster_phrases(&candidates);
+            let clusters = clustering::cluster_phrases(&candidates, 0.25);
             assert_eq!(clusters.len(), 2);
         }
     }
 
     #[test]
     fn test_compute_gap() {
-        use crate::types::ChunkSpan;
-
         fn span(start: usize, end: usize) -> ChunkSpan {
             ChunkSpan {
                 start_token: start,
