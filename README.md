@@ -255,6 +255,37 @@ payload = {
 result = json.loads(extract_from_json(json.dumps(payload)))
 ```
 
+#### Computing topic weights from LDA
+
+The `topic_weights_from_lda` helper computes per-lemma weights from a trained [gensim](https://radimrehurek.com/gensim/) LDA model, so you can go from corpus to keywords in a few lines:
+
+```bash
+pip install rapid_textrank[topic]   # installs gensim
+```
+
+```python
+from gensim.corpora import Dictionary
+from gensim.models import LdaModel
+from rapid_textrank import TopicalPageRank, topic_weights_from_lda
+
+# 1. Train (or load) an LDA model
+texts = [doc.split() for doc in corpus]      # list of token lists
+dictionary = Dictionary(texts)
+bow_corpus = [dictionary.doc2bow(t) for t in texts]
+lda = LdaModel(bow_corpus, num_topics=10, id2word=dictionary)
+
+# 2. Compute topic weights for a single document
+weights = topic_weights_from_lda(lda, bow_corpus[0], dictionary)
+
+# 3. Extract keywords using those weights
+extractor = TopicalPageRank(topic_weights=weights, top_n=10)
+result = extractor.extract_keywords(raw_text)
+for phrase in result.phrases:
+    print(f"{phrase.text}: {phrase.score:.4f}")
+```
+
+`topic_weights_from_lda` accepts an optional `aggregation` parameter (`"max"` or `"mean"`) and `top_n_words` to control how many words per topic are considered. See the docstring for details.
+
 **TopicalPageRank vs BiasedTextRank:** Both bias extraction towards specific terms, but they differ in how:
 - **BiasedTextRank** takes a list of focus terms and a single bias weight. It's manual and direct — good when you know exactly which terms matter.
 - **TopicalPageRank** takes per-word weights, typically from a topic model. It's data-driven — good when you want the topic distribution to guide extraction automatically.
