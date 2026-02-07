@@ -38,7 +38,9 @@ pub use pagerank::{
 };
 pub use phrase::extraction::PhraseExtractor;
 pub use summarizer::selector::SentenceSelector;
-pub use variants::{biased_textrank::BiasedTextRank, position_rank::PositionRank};
+pub use variants::{
+    biased_textrank::BiasedTextRank, position_rank::PositionRank, single_rank::SingleRank,
+};
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -7,6 +7,7 @@ use crate::phrase::extraction::extract_keyphrases_with_info;
 use crate::types::{PhraseGrouping, PosTag, ScoreAggregation, TextRankConfig, Token};
 use crate::variants::biased_textrank::BiasedTextRank;
 use crate::variants::position_rank::PositionRank;
+use crate::variants::single_rank::SingleRank;
 use crate::variants::topic_rank::TopicRank;
 use crate::variants::Variant;
 use pyo3::prelude::*;
@@ -229,6 +230,7 @@ fn extract_with_variant(
             .with_similarity_threshold(json_config.topic_similarity_threshold)
             .with_edge_weight(json_config.topic_edge_weight)
             .extract_with_info(tokens),
+        Variant::SingleRank => SingleRank::with_config(config.clone()).extract_with_info(tokens),
     }
 }
 
