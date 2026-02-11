@@ -712,35 +712,413 @@ impl Graph {
     }
 }
 
-/// PageRank output: per-node scores, convergence info, and optional diagnostics.
+// ============================================================================
+// RankOutput — PageRank scores + convergence metadata
+// ============================================================================
+
+/// Optional diagnostics captured during PageRank iteration.
+///
+/// These are only populated when debug/expose mode is enabled, so the hot
+/// path incurs zero allocation overhead.
+#[derive(Debug, Clone, Default)]
+pub struct RankDiagnostics {
+    /// Per-iteration residual (L1 norm of score delta).
+    ///
+    /// `residuals[i]` is the residual after iteration `i`.  Empty when
+    /// diagnostics are not requested.
+    pub residuals: Vec<f64>,
+}
+
+/// PageRank output: per-node scores, convergence info, and optional
+/// diagnostics.
+///
+/// Scores are stored as a `Vec<f64>` indexed by node ID for cache-friendly
+/// access — the same layout used by the existing [`PageRankResult`].
+///
+/// # Construction
+///
+/// Use [`RankOutput::from_pagerank_result`] to bridge from the existing
+/// `PageRankResult` type.
+#[derive(Debug, Clone)]
 pub struct RankOutput {
-    _private: (),
+    /// Per-node scores indexed by CSR node ID.
+    scores: Vec<f64>,
+    /// Whether the power iteration converged within the threshold.
+    converged: bool,
+    /// Number of iterations actually performed.
+    iterations: u32,
+    /// Final L1-norm convergence delta between the last two iterations.
+    final_delta: f64,
+    /// Optional debug diagnostics (empty by default).
+    diagnostics: Option<RankDiagnostics>,
+}
+
+impl RankOutput {
+    /// Construct from the existing [`PageRankResult`].
+    pub fn from_pagerank_result(pr: &crate::pagerank::PageRankResult) -> Self {
+        Self {
+            scores: pr.scores.clone(),
+            converged: pr.converged,
+            iterations: pr.iterations as u32,
+            final_delta: pr.delta,
+            diagnostics: None,
+        }
+    }
+
+    /// Build directly (for tests or future stage implementations).
+    pub fn new(scores: Vec<f64>, converged: bool, iterations: u32, final_delta: f64) -> Self {
+        Self {
+            scores,
+            converged,
+            iterations,
+            final_delta,
+            diagnostics: None,
+        }
+    }
+
+    /// Attach diagnostics (call after construction when debug is enabled).
+    pub fn with_diagnostics(mut self, diag: RankDiagnostics) -> Self {
+        self.diagnostics = Some(diag);
+        self
+    }
+
+    /// Per-node score slice, indexed by CSR node ID.
+    #[inline]
+    pub fn scores(&self) -> &[f64] {
+        &self.scores
+    }
+
+    /// Score for a specific node.
+    #[inline]
+    pub fn score(&self, node_id: u32) -> f64 {
+        self.scores.get(node_id as usize).copied().unwrap_or(0.0)
+    }
+
+    /// Whether PageRank converged.
+    #[inline]
+    pub fn converged(&self) -> bool {
+        self.converged
+    }
+
+    /// Iteration count.
+    #[inline]
+    pub fn iterations(&self) -> u32 {
+        self.iterations
+    }
+
+    /// Final convergence delta.
+    #[inline]
+    pub fn final_delta(&self) -> f64 {
+        self.final_delta
+    }
+
+    /// Access diagnostics (if attached).
+    #[inline]
+    pub fn diagnostics(&self) -> Option<&RankDiagnostics> {
+        self.diagnostics.as_ref()
+    }
+
+    /// Number of nodes.
+    #[inline]
+    pub fn num_nodes(&self) -> usize {
+        self.scores.len()
+    }
+}
+
+// ============================================================================
+// PhraseSet — pre-format phrase collection
+// ============================================================================
+
+/// A single scored phrase entry in a [`PhraseSet`].
+///
+/// Uses interned IDs where possible; surface forms are optional and lazily
+/// materialized only when needed for formatting.
+#[derive(Debug, Clone)]
+pub struct PhraseEntry {
+    /// Interned lemma IDs for the tokens in this phrase (ordered).
+    pub lemma_ids: Vec<u32>,
+    /// Aggregated score from PageRank.
+    pub score: f64,
+    /// Number of occurrences in the document.
+    pub count: u32,
+    /// Optional canonical surface form (materialized lazily).
+    pub surface: Option<String>,
+    /// Optional lemma string (materialized lazily for grouping key).
+    pub lemma_text: Option<String>,
+    /// Optional token-span pairs for each occurrence (debug only).
+    pub spans: Option<Vec<(u32, u32)>>,
 }
 
 /// Pre-format phrase collection: scored phrases with interned lemma IDs.
 ///
-/// Surface forms are lazily materialized only when needed for formatting.
+/// This is the last internal artifact before [`FormattedResult`] produces the
+/// public output.  Surface forms are lazily materialized — the hot path
+/// operates on interned IDs only.
+///
+/// # Construction
+///
+/// Use [`PhraseSet::from_phrases`] to bridge from the existing `Vec<Phrase>`.
+#[derive(Debug, Clone)]
 pub struct PhraseSet {
-    _private: (),
+    entries: Vec<PhraseEntry>,
+}
+
+impl PhraseSet {
+    /// Construct from the existing `Vec<Phrase>` type.
+    ///
+    /// Interns lemma tokens via the provided pool and eagerly stores the
+    /// surface/lemma strings (since they're already materialized in the
+    /// legacy path).
+    pub fn from_phrases(phrases: &[crate::types::Phrase], pool: &mut StringPool) -> Self {
+        let entries = phrases
+            .iter()
+            .map(|p| {
+                let lemma_ids: Vec<u32> = p
+                    .lemma
+                    .split_whitespace()
+                    .map(|w| pool.intern(w))
+                    .collect();
+                let spans = if p.offsets.is_empty() {
+                    None
+                } else {
+                    Some(
+                        p.offsets
+                            .iter()
+                            .map(|&(s, e)| (s as u32, e as u32))
+                            .collect(),
+                    )
+                };
+                PhraseEntry {
+                    lemma_ids,
+                    score: p.score,
+                    count: p.count as u32,
+                    surface: Some(p.text.clone()),
+                    lemma_text: Some(p.lemma.clone()),
+                    spans,
+                }
+            })
+            .collect();
+        Self { entries }
+    }
+
+    /// Build from raw entries.
+    pub fn from_entries(entries: Vec<PhraseEntry>) -> Self {
+        Self { entries }
+    }
+
+    /// Access the phrase entries.
+    #[inline]
+    pub fn entries(&self) -> &[PhraseEntry] {
+        &self.entries
+    }
+
+    /// Number of phrases.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether there are no phrases.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Borrow as a [`PhraseSetRef`].
+    #[inline]
+    pub fn as_ref(&self) -> PhraseSetRef<'_> {
+        PhraseSetRef {
+            entries: &self.entries,
+        }
+    }
 }
 
 /// Borrowed view into a [`PhraseSet`].
+#[derive(Debug, Clone, Copy)]
 pub struct PhraseSetRef<'a> {
-    _private: std::marker::PhantomData<&'a ()>,
+    entries: &'a [PhraseEntry],
 }
+
+impl<'a> PhraseSetRef<'a> {
+    /// Access the phrase entries.
+    #[inline]
+    pub fn entries(&self) -> &'a [PhraseEntry] {
+        self.entries
+    }
+
+    /// Number of phrases.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether there are no phrases.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+// ============================================================================
+// FormattedResult — public-facing output (stability boundary)
+// ============================================================================
 
 /// Public-facing formatted output — the stability boundary.
 ///
-/// Everything before this type is internal and may change; this type is the
-/// public contract exposed to Python and JSON consumers.
+/// Everything before this type is internal and may change; **this type is the
+/// public contract** exposed to Python and JSON consumers.  It wraps the
+/// existing `Vec<Phrase>` + convergence metadata, plus an optional debug
+/// payload for power users.
+///
+/// # Construction
+///
+/// Use [`FormattedResult::from_extraction`] to bridge from the existing
+/// `ExtractionResult`.
+#[derive(Debug, Clone)]
 pub struct FormattedResult {
-    _private: (),
+    /// The ranked phrases (public output).
+    pub phrases: Vec<crate::types::Phrase>,
+    /// Whether PageRank converged.
+    pub converged: bool,
+    /// Number of PageRank iterations.
+    pub iterations: u32,
+    /// Optional debug payload (opt-in via `expose` config).
+    pub debug: Option<DebugPayload>,
 }
+
+/// Optional debug information attached to a [`FormattedResult`].
+///
+/// Power users can request this via the `expose` config key.  Fields are
+/// individually optional so callers pay only for what they ask for.
+#[derive(Debug, Clone, Default)]
+pub struct DebugPayload {
+    /// Top-K node scores (node lemma → score).
+    pub node_scores: Option<Vec<(String, f64)>>,
+    /// Graph statistics.
+    pub graph_stats: Option<GraphStats>,
+    /// Per-stage timing in milliseconds.
+    pub stage_timings: Option<Vec<(String, f64)>>,
+    /// PageRank convergence residuals.
+    pub residuals: Option<Vec<f64>>,
+}
+
+/// Summary statistics for the co-occurrence graph.
+#[derive(Debug, Clone)]
+pub struct GraphStats {
+    pub num_nodes: usize,
+    pub num_edges: usize,
+}
+
+impl FormattedResult {
+    /// Construct from the existing `ExtractionResult`.
+    pub fn from_extraction(er: &crate::phrase::extraction::ExtractionResult) -> Self {
+        Self {
+            phrases: er.phrases.clone(),
+            converged: er.converged,
+            iterations: er.iterations as u32,
+            debug: None,
+        }
+    }
+
+    /// Build directly.
+    pub fn new(
+        phrases: Vec<crate::types::Phrase>,
+        converged: bool,
+        iterations: u32,
+    ) -> Self {
+        Self {
+            phrases,
+            converged,
+            iterations,
+            debug: None,
+        }
+    }
+
+    /// Attach debug payload.
+    pub fn with_debug(mut self, debug: DebugPayload) -> Self {
+        self.debug = Some(debug);
+        self
+    }
+}
+
+// ============================================================================
+// PipelineWorkspace — reusable scratch buffers
+// ============================================================================
 
 /// Reusable scratch buffers for reducing allocator churn across repeated
 /// pipeline invocations (common in Python batch processing).
+///
+/// The workspace owns heap-allocated buffers that are **cleared but not
+/// deallocated** between runs via [`PipelineWorkspace::clear`].  This avoids
+/// repeated `malloc`/`free` cycles for the most allocation-heavy stages.
+///
+/// # Usage
+///
+/// Create once, pass `&mut workspace` into `PipelineRunner`, and reuse across
+/// documents in a batch loop.
+#[derive(Debug)]
 pub struct PipelineWorkspace {
-    _private: (),
+    /// Scratch buffer for edge pairs during graph construction.
+    pub edge_buf: Vec<(u32, u32, f64)>,
+    /// Scratch buffer for PageRank score vector.
+    pub score_buf: Vec<f64>,
+    /// Scratch buffer for PageRank normalization / dangling-mass.
+    pub norm_buf: Vec<f64>,
+    /// Scratch buffer for phrase grouping keys.
+    pub group_keys: Vec<String>,
+}
+
+impl PipelineWorkspace {
+    /// Create a new workspace with default (empty) buffers.
+    pub fn new() -> Self {
+        Self {
+            edge_buf: Vec::new(),
+            score_buf: Vec::new(),
+            norm_buf: Vec::new(),
+            group_keys: Vec::new(),
+        }
+    }
+
+    /// Create a workspace with pre-allocated buffer capacities.
+    ///
+    /// Useful when approximate document sizes are known up front.
+    pub fn with_capacity(
+        edge_cap: usize,
+        node_cap: usize,
+        phrase_cap: usize,
+    ) -> Self {
+        Self {
+            edge_buf: Vec::with_capacity(edge_cap),
+            score_buf: Vec::with_capacity(node_cap),
+            norm_buf: Vec::with_capacity(node_cap),
+            group_keys: Vec::with_capacity(phrase_cap),
+        }
+    }
+
+    /// Clear all buffers without deallocating.
+    ///
+    /// After this call, all buffers have `len() == 0` but retain their
+    /// allocated capacity for the next pipeline invocation.
+    pub fn clear(&mut self) {
+        self.edge_buf.clear();
+        self.score_buf.clear();
+        self.norm_buf.clear();
+        self.group_keys.clear();
+    }
+
+    /// Total heap capacity held by all buffers (in bytes, approximate).
+    pub fn capacity_bytes(&self) -> usize {
+        self.edge_buf.capacity() * std::mem::size_of::<(u32, u32, f64)>()
+            + self.score_buf.capacity() * std::mem::size_of::<f64>()
+            + self.norm_buf.capacity() * std::mem::size_of::<f64>()
+            + self.group_keys.capacity() * std::mem::size_of::<String>()
+    }
+}
+
+impl Default for PipelineWorkspace {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ============================================================================
@@ -1320,5 +1698,263 @@ mod tests {
         assert_eq!(cloned.num_nodes(), graph.num_nodes());
         assert_eq!(cloned.num_edges(), graph.num_edges());
         assert_eq!(cloned.is_transformed(), graph.is_transformed());
+    }
+
+    // ================================================================
+    // RankOutput tests
+    // ================================================================
+
+    #[test]
+    fn test_rank_output_new() {
+        let ro = RankOutput::new(vec![0.3, 0.5, 0.2], true, 42, 1e-7);
+
+        assert_eq!(ro.scores(), &[0.3, 0.5, 0.2]);
+        assert!(ro.converged());
+        assert_eq!(ro.iterations(), 42);
+        assert!((ro.final_delta() - 1e-7).abs() < 1e-15);
+        assert_eq!(ro.num_nodes(), 3);
+        assert!(ro.diagnostics().is_none());
+    }
+
+    #[test]
+    fn test_rank_output_score_lookup() {
+        let ro = RankOutput::new(vec![0.1, 0.9], true, 10, 0.0);
+
+        assert!((ro.score(0) - 0.1).abs() < 1e-15);
+        assert!((ro.score(1) - 0.9).abs() < 1e-15);
+        // Out-of-bounds returns 0.0.
+        assert!((ro.score(999)).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_rank_output_from_pagerank_result() {
+        let pr = crate::pagerank::PageRankResult {
+            scores: vec![0.25, 0.25, 0.25, 0.25],
+            iterations: 50,
+            delta: 5e-7,
+            converged: true,
+        };
+        let ro = RankOutput::from_pagerank_result(&pr);
+
+        assert_eq!(ro.scores(), &[0.25, 0.25, 0.25, 0.25]);
+        assert!(ro.converged());
+        assert_eq!(ro.iterations(), 50);
+        assert!((ro.final_delta() - 5e-7).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_rank_output_with_diagnostics() {
+        let diag = RankDiagnostics {
+            residuals: vec![0.5, 0.1, 0.01, 0.001],
+        };
+        let ro = RankOutput::new(vec![1.0], true, 4, 0.001).with_diagnostics(diag);
+
+        let d = ro.diagnostics().unwrap();
+        assert_eq!(d.residuals.len(), 4);
+        assert!((d.residuals[0] - 0.5).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_rank_output_not_converged() {
+        let ro = RankOutput::new(vec![0.5, 0.5], false, 100, 0.05);
+
+        assert!(!ro.converged());
+        assert_eq!(ro.iterations(), 100);
+    }
+
+    // ================================================================
+    // PhraseSet tests
+    // ================================================================
+
+    fn sample_phrases() -> Vec<crate::types::Phrase> {
+        vec![
+            crate::types::Phrase {
+                text: "machine learning".to_string(),
+                lemma: "machine learning".to_string(),
+                score: 0.85,
+                count: 3,
+                offsets: vec![(0, 2), (10, 12), (20, 22)],
+                rank: 1,
+            },
+            crate::types::Phrase {
+                text: "neural network".to_string(),
+                lemma: "neural network".to_string(),
+                score: 0.72,
+                count: 2,
+                offsets: vec![(5, 7)],
+                rank: 2,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_phrase_set_from_phrases() {
+        let phrases = sample_phrases();
+        let mut pool = StringPool::new();
+        let ps = PhraseSet::from_phrases(&phrases, &mut pool);
+
+        assert_eq!(ps.len(), 2);
+        assert!(!ps.is_empty());
+
+        let e0 = &ps.entries()[0];
+        assert!((e0.score - 0.85).abs() < 1e-15);
+        assert_eq!(e0.count, 3);
+        assert_eq!(e0.surface.as_deref(), Some("machine learning"));
+        assert_eq!(e0.lemma_text.as_deref(), Some("machine learning"));
+        // "machine learning" → 2 lemma tokens.
+        assert_eq!(e0.lemma_ids.len(), 2);
+        // 3 occurrence spans.
+        assert_eq!(e0.spans.as_ref().unwrap().len(), 3);
+
+        let e1 = &ps.entries()[1];
+        assert!((e1.score - 0.72).abs() < 1e-15);
+        assert_eq!(e1.count, 2);
+    }
+
+    #[test]
+    fn test_phrase_set_empty() {
+        let mut pool = StringPool::new();
+        let ps = PhraseSet::from_phrases(&[], &mut pool);
+
+        assert!(ps.is_empty());
+        assert_eq!(ps.len(), 0);
+    }
+
+    #[test]
+    fn test_phrase_set_ref_mirrors_owned() {
+        let phrases = sample_phrases();
+        let mut pool = StringPool::new();
+        let ps = PhraseSet::from_phrases(&phrases, &mut pool);
+        let r = ps.as_ref();
+
+        assert_eq!(r.len(), ps.len());
+        assert_eq!(r.entries().len(), ps.entries().len());
+        assert!((r.entries()[0].score - 0.85).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_phrase_set_no_offsets() {
+        let phrases = vec![crate::types::Phrase::new("test", "test", 0.5, 1)];
+        let mut pool = StringPool::new();
+        let ps = PhraseSet::from_phrases(&phrases, &mut pool);
+
+        // Phrase::new creates empty offsets → spans should be None.
+        assert!(ps.entries()[0].spans.is_none());
+    }
+
+    #[test]
+    fn test_phrase_entry_from_raw() {
+        let entry = PhraseEntry {
+            lemma_ids: vec![0, 1],
+            score: 0.9,
+            count: 5,
+            surface: None,
+            lemma_text: None,
+            spans: None,
+        };
+        let ps = PhraseSet::from_entries(vec![entry]);
+
+        assert_eq!(ps.len(), 1);
+        assert!(ps.entries()[0].surface.is_none());
+    }
+
+    // ================================================================
+    // FormattedResult tests
+    // ================================================================
+
+    #[test]
+    fn test_formatted_result_new() {
+        let phrases = sample_phrases();
+        let fr = FormattedResult::new(phrases.clone(), true, 50);
+
+        assert_eq!(fr.phrases.len(), 2);
+        assert!(fr.converged);
+        assert_eq!(fr.iterations, 50);
+        assert!(fr.debug.is_none());
+    }
+
+    #[test]
+    fn test_formatted_result_from_extraction() {
+        let er = crate::phrase::extraction::ExtractionResult {
+            phrases: sample_phrases(),
+            converged: false,
+            iterations: 100,
+        };
+        let fr = FormattedResult::from_extraction(&er);
+
+        assert_eq!(fr.phrases.len(), 2);
+        assert!(!fr.converged);
+        assert_eq!(fr.iterations, 100);
+        assert!(fr.debug.is_none());
+    }
+
+    #[test]
+    fn test_formatted_result_with_debug() {
+        let fr = FormattedResult::new(vec![], true, 10).with_debug(DebugPayload {
+            node_scores: Some(vec![("machine|NOUN".to_string(), 0.5)]),
+            graph_stats: Some(GraphStats {
+                num_nodes: 10,
+                num_edges: 25,
+            }),
+            stage_timings: None,
+            residuals: None,
+        });
+
+        let d = fr.debug.as_ref().unwrap();
+        assert_eq!(d.node_scores.as_ref().unwrap().len(), 1);
+        assert_eq!(d.graph_stats.as_ref().unwrap().num_nodes, 10);
+        assert!(d.stage_timings.is_none());
+    }
+
+    // ================================================================
+    // PipelineWorkspace tests
+    // ================================================================
+
+    #[test]
+    fn test_workspace_new() {
+        let ws = PipelineWorkspace::new();
+
+        assert!(ws.edge_buf.is_empty());
+        assert!(ws.score_buf.is_empty());
+        assert!(ws.norm_buf.is_empty());
+        assert!(ws.group_keys.is_empty());
+    }
+
+    #[test]
+    fn test_workspace_with_capacity() {
+        let ws = PipelineWorkspace::with_capacity(100, 50, 20);
+
+        assert!(ws.edge_buf.capacity() >= 100);
+        assert!(ws.score_buf.capacity() >= 50);
+        assert!(ws.norm_buf.capacity() >= 50);
+        assert!(ws.group_keys.capacity() >= 20);
+    }
+
+    #[test]
+    fn test_workspace_clear_retains_capacity() {
+        let mut ws = PipelineWorkspace::new();
+        // Fill buffers.
+        ws.edge_buf.extend_from_slice(&[(0, 1, 1.0), (1, 2, 2.0)]);
+        ws.score_buf.extend_from_slice(&[0.5; 100]);
+        ws.norm_buf.extend_from_slice(&[1.0; 100]);
+        ws.group_keys.push("test".to_string());
+
+        let cap_before = ws.capacity_bytes();
+        assert!(cap_before > 0);
+
+        ws.clear();
+
+        assert!(ws.edge_buf.is_empty());
+        assert!(ws.score_buf.is_empty());
+        assert!(ws.norm_buf.is_empty());
+        assert!(ws.group_keys.is_empty());
+        // Capacity retained.
+        assert_eq!(ws.capacity_bytes(), cap_before);
+    }
+
+    #[test]
+    fn test_workspace_default() {
+        let ws = PipelineWorkspace::default();
+        assert!(ws.edge_buf.is_empty());
     }
 }
