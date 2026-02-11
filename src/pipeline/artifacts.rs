@@ -294,18 +294,287 @@ impl<'a> TokenStreamRef<'a> {
     }
 }
 
+// ============================================================================
+// CandidateSet — unified word-level and phrase-level candidates
+// ============================================================================
+
+/// A single word-level candidate node (TextRank / PositionRank / BiasedTextRank
+/// / SingleRank / TopicalPageRank families).
+///
+/// One entry per unique graph key (`lemma` or `lemma|POS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WordCandidate {
+    /// Interned lemma ID in the parent [`TokenStream`]'s pool.
+    pub lemma_id: u32,
+    /// Part-of-speech tag.
+    pub pos: PosTag,
+    /// Token index of the first occurrence in the document.
+    pub first_position: u32,
+}
+
+impl WordCandidate {
+    /// Build the graph-node key, mirroring [`TokenEntry::graph_key`].
+    #[inline]
+    pub fn graph_key(&self, pool: &StringPool, use_pos_in_nodes: bool) -> String {
+        let lemma = pool.get(self.lemma_id).unwrap_or("");
+        if use_pos_in_nodes {
+            format!("{}|{}", lemma, self.pos.as_str())
+        } else {
+            lemma.to_owned()
+        }
+    }
+}
+
+/// A single phrase-level candidate (TopicRank / MultipartiteRank families).
+///
+/// Represents a noun chunk with its token span, surface forms, and the term
+/// set used for Jaccard-based clustering.
+#[derive(Debug, Clone)]
+pub struct PhraseCandidate {
+    /// Start token index (inclusive) in the parent token stream.
+    pub start_token: u32,
+    /// End token index (exclusive).
+    pub end_token: u32,
+    /// Character byte-offset of the first byte.
+    pub start_char: u32,
+    /// Character byte-offset one past the last byte.
+    pub end_char: u32,
+    /// Sentence this phrase belongs to.
+    pub sentence_idx: u32,
+    /// Interned IDs for individual lemma tokens within the phrase.
+    ///
+    /// Used for Jaccard similarity during clustering.  Ordered to match the
+    /// token sequence; equality/hashing uses the set of unique IDs.
+    pub lemma_ids: Vec<u32>,
+    /// Interned IDs for non-stopword surface forms (the "term set").
+    ///
+    /// This mirrors the `FxHashSet<String>` in the legacy `PhraseCandidate`
+    /// but uses interned IDs for cheaper set operations.
+    pub term_ids: Vec<u32>,
+}
+
+impl PhraseCandidate {
+    /// Token span length.
+    #[inline]
+    pub fn token_len(&self) -> u32 {
+        self.end_token - self.start_token
+    }
+}
+
+/// Distinguishes the two candidate families.
+///
+/// Downstream stages (GraphBuilder, TeleportBuilder, etc.) can match on this
+/// to select the appropriate processing strategy.
+#[derive(Debug, Clone)]
+pub enum CandidateKind {
+    /// Word-level candidates (one per unique graph key).
+    Words(Vec<WordCandidate>),
+    /// Phrase-level candidates (one per noun chunk).
+    Phrases(Vec<PhraseCandidate>),
+}
+
 /// Set of candidate nodes (word-level or phrase-level) selected for graph
 /// construction.
 ///
-/// Supports both word-node candidates (TextRank, PositionRank, etc.) and
-/// phrase-level candidates (TopicRank, MultipartiteRank).
+/// Wraps a [`CandidateKind`] enum so downstream stages can work with
+/// candidate indices uniformly while dispatching on the variant family.
+///
+/// # Construction
+///
+/// Use [`CandidateSet::from_word_tokens`] to build from a token stream
+/// (word-level), or [`CandidateSet::from_phrase_chunks`] for phrase-level.
+#[derive(Debug, Clone)]
 pub struct CandidateSet {
-    _private: (),
+    kind: CandidateKind,
+}
+
+impl CandidateSet {
+    /// Build a word-level candidate set from a token stream.
+    ///
+    /// Filters tokens by `include_pos` (or default content-word check when
+    /// empty) and stopword flag, deduplicates by graph key, and records the
+    /// first occurrence position for each unique key.
+    pub fn from_word_tokens(
+        stream: &TokenStream,
+        include_pos: &[PosTag],
+        use_pos_in_nodes: bool,
+    ) -> Self {
+        use rustc_hash::FxHashMap;
+
+        // Key: (lemma_id, optional POS discriminant) → index into `words`.
+        let mut seen: FxHashMap<(u32, Option<PosTag>), usize> = FxHashMap::default();
+        let mut words = Vec::new();
+
+        for entry in stream.tokens() {
+            if entry.is_stopword {
+                continue;
+            }
+            let pass = if include_pos.is_empty() {
+                entry.pos.is_content_word()
+            } else {
+                include_pos.contains(&entry.pos)
+            };
+            if !pass {
+                continue;
+            }
+
+            let key = if use_pos_in_nodes {
+                (entry.lemma_id, Some(entry.pos))
+            } else {
+                (entry.lemma_id, None)
+            };
+
+            if !seen.contains_key(&key) {
+                seen.insert(key, words.len());
+                words.push(WordCandidate {
+                    lemma_id: entry.lemma_id,
+                    pos: entry.pos,
+                    first_position: entry.token_idx,
+                });
+            }
+        }
+
+        Self {
+            kind: CandidateKind::Words(words),
+        }
+    }
+
+    /// Build a phrase-level candidate set from pre-computed chunk spans.
+    ///
+    /// Each chunk is turned into a [`PhraseCandidate`] whose `lemma_ids` and
+    /// `term_ids` are resolved against the token stream's interning pool.
+    pub fn from_phrase_chunks(
+        stream: &TokenStream,
+        chunks: &[crate::types::ChunkSpan],
+    ) -> Self {
+        let mut phrases = Vec::with_capacity(chunks.len());
+
+        for chunk in chunks {
+            let start = chunk.start_token;
+            let end = chunk.end_token;
+
+            let mut lemma_ids = Vec::with_capacity(end - start);
+            let mut term_ids = Vec::new();
+
+            for &entry in &stream.tokens()[start..end] {
+                lemma_ids.push(entry.lemma_id);
+                if !entry.is_stopword {
+                    // Use text_id for term set (matches legacy `t.text.clone()`)
+                    if !term_ids.contains(&entry.text_id) {
+                        term_ids.push(entry.text_id);
+                    }
+                }
+            }
+
+            phrases.push(PhraseCandidate {
+                start_token: start as u32,
+                end_token: end as u32,
+                start_char: chunk.start_char as u32,
+                end_char: chunk.end_char as u32,
+                sentence_idx: chunk.sentence_idx as u32,
+                lemma_ids,
+                term_ids,
+            });
+        }
+
+        Self {
+            kind: CandidateKind::Phrases(phrases),
+        }
+    }
+
+    /// The candidate variant (word-level or phrase-level).
+    #[inline]
+    pub fn kind(&self) -> &CandidateKind {
+        &self.kind
+    }
+
+    /// Number of candidates.
+    #[inline]
+    pub fn len(&self) -> usize {
+        match &self.kind {
+            CandidateKind::Words(w) => w.len(),
+            CandidateKind::Phrases(p) => p.len(),
+        }
+    }
+
+    /// Whether there are no candidates.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Borrow as a [`CandidateSetRef`].
+    #[inline]
+    pub fn as_ref(&self) -> CandidateSetRef<'_> {
+        CandidateSetRef { kind: &self.kind }
+    }
+
+    /// Access word candidates (panics if phrase-level).
+    #[inline]
+    pub fn words(&self) -> &[WordCandidate] {
+        match &self.kind {
+            CandidateKind::Words(w) => w,
+            CandidateKind::Phrases(_) => panic!("called words() on phrase-level CandidateSet"),
+        }
+    }
+
+    /// Access phrase candidates (panics if word-level).
+    #[inline]
+    pub fn phrases(&self) -> &[PhraseCandidate] {
+        match &self.kind {
+            CandidateKind::Phrases(p) => p,
+            CandidateKind::Words(_) => panic!("called phrases() on word-level CandidateSet"),
+        }
+    }
 }
 
 /// Borrowed view into a [`CandidateSet`].
+///
+/// Stages accept this to avoid requiring ownership of the candidate data.
+#[derive(Debug, Clone, Copy)]
 pub struct CandidateSetRef<'a> {
-    _private: std::marker::PhantomData<&'a ()>,
+    kind: &'a CandidateKind,
+}
+
+impl<'a> CandidateSetRef<'a> {
+    /// The candidate variant.
+    #[inline]
+    pub fn kind(&self) -> &'a CandidateKind {
+        self.kind
+    }
+
+    /// Number of candidates.
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self.kind {
+            CandidateKind::Words(w) => w.len(),
+            CandidateKind::Phrases(p) => p.len(),
+        }
+    }
+
+    /// Whether there are no candidates.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Access word candidates.
+    #[inline]
+    pub fn words(&self) -> &'a [WordCandidate] {
+        match self.kind {
+            CandidateKind::Words(w) => w,
+            CandidateKind::Phrases(_) => panic!("called words() on phrase-level CandidateSetRef"),
+        }
+    }
+
+    /// Access phrase candidates.
+    #[inline]
+    pub fn phrases(&self) -> &'a [PhraseCandidate] {
+        match self.kind {
+            CandidateKind::Phrases(p) => p,
+            CandidateKind::Words(_) => panic!("called phrases() on word-level CandidateSetRef"),
+        }
+    }
 }
 
 /// Pipeline-level graph artifact wrapping the CSR-backed adjacency + weights.
@@ -535,5 +804,252 @@ mod tests {
         let r1 = stream.as_ref();
         let r2 = r1; // Copy
         assert_eq!(r1.len(), r2.len()); // both usable
+    }
+
+    // ================================================================
+    // CandidateSet — word-level tests
+    // ================================================================
+
+    /// Helper: tokens with a stopword ("is") for candidate filtering tests.
+    fn tokens_with_stopword() -> Vec<Token> {
+        let mut tokens = sample_tokens();
+        tokens[2].is_stopword = true; // "is" sentence 0
+        tokens[5].is_stopword = true; // "is" sentence 1
+        tokens
+    }
+
+    #[test]
+    fn test_word_candidates_default_pos() {
+        let tokens = tokens_with_stopword();
+        let stream = TokenStream::from_tokens(&tokens);
+        // Empty include_pos → use default is_content_word() (Noun, Verb, Adj, ProperNoun).
+        // Stopwords are excluded, so "be" (verb, stopword) is out.
+        let cs = CandidateSet::from_word_tokens(&stream, &[], true);
+
+        assert!(matches!(cs.kind(), CandidateKind::Words(_)));
+        // "machine" NOUN, "learning" NOUN, "great" ADJ, "rust" PROPN, "fast" ADJ
+        assert_eq!(cs.len(), 5);
+        assert!(!cs.is_empty());
+
+        // First positions should be monotonically increasing (dedup by graph key).
+        let words = cs.words();
+        for w in words {
+            assert!(stream.pool().get(w.lemma_id).is_some());
+        }
+    }
+
+    #[test]
+    fn test_word_candidates_custom_pos() {
+        let tokens = tokens_with_stopword();
+        let stream = TokenStream::from_tokens(&tokens);
+        // Only Nouns.
+        let cs = CandidateSet::from_word_tokens(&stream, &[PosTag::Noun], true);
+
+        let words = cs.words();
+        // "machine" NOUN, "learning" NOUN
+        assert_eq!(words.len(), 2);
+        for w in words {
+            assert_eq!(w.pos, PosTag::Noun);
+        }
+    }
+
+    #[test]
+    fn test_word_candidates_dedup_with_pos() {
+        // Two tokens with same lemma but different POS.
+        let tokens = vec![
+            Token::new("fast", "fast", PosTag::Adjective, 0, 4, 0, 0),
+            Token::new("fast", "fast", PosTag::Adverb, 5, 9, 0, 1),
+        ];
+        let stream = TokenStream::from_tokens(&tokens);
+
+        // With POS in nodes: "fast|ADJ" and "fast|ADV" are distinct.
+        let cs_pos = CandidateSet::from_word_tokens(&stream, &[], true);
+        // Adverb is not a content word, so only ADJ passes default filter.
+        assert_eq!(cs_pos.len(), 1);
+
+        // Allow both ADJ and ADV explicitly:
+        let cs_both = CandidateSet::from_word_tokens(
+            &stream,
+            &[PosTag::Adjective, PosTag::Adverb],
+            true,
+        );
+        assert_eq!(cs_both.len(), 2);
+
+        // Without POS in nodes: same lemma → deduplicated to one.
+        let cs_no_pos = CandidateSet::from_word_tokens(
+            &stream,
+            &[PosTag::Adjective, PosTag::Adverb],
+            false,
+        );
+        assert_eq!(cs_no_pos.len(), 1);
+    }
+
+    #[test]
+    fn test_word_candidates_first_position() {
+        let tokens = vec![
+            Token::new("great", "great", PosTag::Adjective, 0, 5, 0, 0),
+            Token::new("world", "world", PosTag::Noun, 6, 11, 0, 1),
+            Token::new("great", "great", PosTag::Adjective, 12, 17, 0, 2), // duplicate
+        ];
+        let stream = TokenStream::from_tokens(&tokens);
+        let cs = CandidateSet::from_word_tokens(&stream, &[], true);
+
+        let words = cs.words();
+        let great = words.iter().find(|w| {
+            stream.pool().get(w.lemma_id) == Some("great")
+        }).unwrap();
+        // First position is token 0, not 2.
+        assert_eq!(great.first_position, 0);
+    }
+
+    #[test]
+    fn test_word_candidates_empty_stream() {
+        let stream = TokenStream::from_tokens(&[]);
+        let cs = CandidateSet::from_word_tokens(&stream, &[], true);
+
+        assert!(cs.is_empty());
+        assert_eq!(cs.len(), 0);
+    }
+
+    #[test]
+    fn test_word_candidate_graph_key() {
+        let tokens = sample_tokens();
+        let stream = TokenStream::from_tokens(&tokens);
+        let cs = CandidateSet::from_word_tokens(&stream, &[], true);
+
+        let words = cs.words();
+        let w0 = &words[0]; // first candidate: "machine" NOUN
+        assert_eq!(w0.graph_key(stream.pool(), true), "machine|NOUN");
+        assert_eq!(w0.graph_key(stream.pool(), false), "machine");
+    }
+
+    // ================================================================
+    // CandidateSet — phrase-level tests
+    // ================================================================
+
+    #[test]
+    fn test_phrase_candidates_from_chunks() {
+        let tokens = vec![
+            Token::new("machine", "machine", PosTag::Noun, 0, 7, 0, 0),
+            Token::new("learning", "learning", PosTag::Noun, 8, 16, 0, 1),
+            Token::new("is", "be", PosTag::Verb, 17, 19, 0, 2),
+            Token::new("very", "very", PosTag::Adverb, 20, 24, 0, 3),
+            Token::new("fast", "fast", PosTag::Adjective, 25, 29, 0, 4),
+        ];
+        let stream = TokenStream::from_tokens(&tokens);
+
+        let chunks = vec![
+            crate::types::ChunkSpan {
+                start_token: 0,
+                end_token: 2,
+                start_char: 0,
+                end_char: 16,
+                sentence_idx: 0,
+            },
+        ];
+
+        let cs = CandidateSet::from_phrase_chunks(&stream, &chunks);
+        assert!(matches!(cs.kind(), CandidateKind::Phrases(_)));
+        assert_eq!(cs.len(), 1);
+
+        let p = &cs.phrases()[0];
+        assert_eq!(p.start_token, 0);
+        assert_eq!(p.end_token, 2);
+        assert_eq!(p.start_char, 0);
+        assert_eq!(p.end_char, 16);
+        assert_eq!(p.sentence_idx, 0);
+        assert_eq!(p.token_len(), 2);
+        // lemma_ids: "machine", "learning"
+        assert_eq!(p.lemma_ids.len(), 2);
+        // Both tokens are non-stopword, so term_ids has 2 unique text_ids.
+        assert_eq!(p.term_ids.len(), 2);
+    }
+
+    #[test]
+    fn test_phrase_candidates_stopword_excluded_from_terms() {
+        let mut tokens = vec![
+            Token::new("the", "the", PosTag::Determiner, 0, 3, 0, 0),
+            Token::new("big", "big", PosTag::Adjective, 4, 7, 0, 1),
+            Token::new("cat", "cat", PosTag::Noun, 8, 11, 0, 2),
+        ];
+        tokens[0].is_stopword = true; // "the" is a stopword
+
+        let stream = TokenStream::from_tokens(&tokens);
+        let chunks = vec![crate::types::ChunkSpan {
+            start_token: 0,
+            end_token: 3,
+            start_char: 0,
+            end_char: 11,
+            sentence_idx: 0,
+        }];
+
+        let cs = CandidateSet::from_phrase_chunks(&stream, &chunks);
+        let p = &cs.phrases()[0];
+
+        // All 3 tokens contribute lemma_ids.
+        assert_eq!(p.lemma_ids.len(), 3);
+        // Only non-stopword tokens contribute to term_ids.
+        assert_eq!(p.term_ids.len(), 2); // "big", "cat"
+    }
+
+    #[test]
+    fn test_phrase_candidates_empty() {
+        let stream = TokenStream::from_tokens(&[]);
+        let cs = CandidateSet::from_phrase_chunks(&stream, &[]);
+
+        assert!(cs.is_empty());
+        assert_eq!(cs.len(), 0);
+    }
+
+    // ================================================================
+    // CandidateSetRef tests
+    // ================================================================
+
+    #[test]
+    fn test_candidate_set_ref_mirrors_owned() {
+        let tokens = tokens_with_stopword();
+        let stream = TokenStream::from_tokens(&tokens);
+        let cs = CandidateSet::from_word_tokens(&stream, &[], true);
+        let r = cs.as_ref();
+
+        assert_eq!(r.len(), cs.len());
+        assert_eq!(r.words().len(), cs.words().len());
+        assert!(matches!(r.kind(), CandidateKind::Words(_)));
+    }
+
+    #[test]
+    fn test_candidate_set_ref_is_copy() {
+        let tokens = sample_tokens();
+        let stream = TokenStream::from_tokens(&tokens);
+        let cs = CandidateSet::from_word_tokens(&stream, &[], true);
+        let r1 = cs.as_ref();
+        let r2 = r1; // Copy
+        assert_eq!(r1.len(), r2.len());
+    }
+
+    #[test]
+    #[should_panic(expected = "called phrases() on word-level")]
+    fn test_words_panics_on_phrases_access() {
+        let tokens = sample_tokens();
+        let stream = TokenStream::from_tokens(&tokens);
+        let cs = CandidateSet::from_word_tokens(&stream, &[], true);
+        let _ = cs.phrases(); // should panic
+    }
+
+    #[test]
+    #[should_panic(expected = "called words() on phrase-level")]
+    fn test_phrases_panics_on_words_access() {
+        let stream = TokenStream::from_tokens(&[
+            Token::new("a", "a", PosTag::Noun, 0, 1, 0, 0),
+        ]);
+        let chunks = vec![crate::types::ChunkSpan {
+            start_token: 0,
+            end_token: 1,
+            start_char: 0,
+            end_char: 1,
+            sentence_idx: 0,
+        }];
+        let cs = CandidateSet::from_phrase_chunks(&stream, &chunks);
+        let _ = cs.words(); // should panic
     }
 }

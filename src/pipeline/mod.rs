@@ -21,6 +21,7 @@ pub mod validation;
 
 // Re-export artifact types for convenient access.
 pub use artifacts::{
-    CandidateSet, CandidateSetRef, FormattedResult, Graph, PhraseSet, PhraseSetRef,
-    PipelineWorkspace, RankOutput, TokenEntry, TokenStream, TokenStreamRef,
+    CandidateKind, CandidateSet, CandidateSetRef, FormattedResult, Graph, PhraseCandidate,
+    PhraseSet, PhraseSetRef, PipelineWorkspace, RankOutput, TokenEntry, TokenStream,
+    TokenStreamRef, WordCandidate,
 };
