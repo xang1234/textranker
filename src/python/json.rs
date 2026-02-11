@@ -4,6 +4,8 @@
 //! minimizes Python↔Rust overhead by passing pre-tokenized data.
 
 use crate::phrase::extraction::extract_keyphrases_with_info;
+use crate::pipeline::spec::PipelineSpec;
+use crate::pipeline::validation::{ValidationEngine, ValidationReport};
 use crate::types::{PhraseGrouping, PosTag, ScoreAggregation, TextRankConfig, Token};
 use crate::variants::biased_textrank::BiasedTextRank;
 use crate::variants::multipartite_rank::MultipartiteRank;
@@ -48,11 +50,20 @@ impl From<JsonToken> for Token {
 /// Input document from JSON
 #[derive(Debug, Clone, Deserialize)]
 pub struct JsonDocument {
+    /// Pre-tokenized input. Optional when `validate_only` is `true`.
+    #[serde(default)]
     pub tokens: Vec<JsonToken>,
     #[serde(default)]
     pub config: Option<JsonConfig>,
     #[serde(default)]
     pub variant: Option<String>,
+    /// Optional pipeline specification for modular pipeline configuration.
+    #[serde(default)]
+    pub pipeline: Option<serde_json::Value>,
+    /// When `true`, validate the pipeline spec and return a report
+    /// without running extraction.
+    #[serde(default)]
+    pub validate_only: bool,
 }
 
 /// Configuration from JSON
@@ -292,19 +303,59 @@ pub struct JsonResult {
     pub iterations: usize,
 }
 
+/// JSON response for validation-only requests.
+#[derive(Debug, Clone, Serialize)]
+pub struct ValidationResponse {
+    /// `true` if the spec has no errors (warnings are acceptable).
+    pub valid: bool,
+    /// All diagnostics (errors and warnings).
+    #[serde(flatten)]
+    pub report: ValidationReport,
+}
+
+/// Validate a pipeline spec (pure Rust, no PyO3 dependency).
+///
+/// Used by both `extract_from_json` (when `validate_only` is true)
+/// and `validate_pipeline_spec`.
+pub fn validate_spec_impl(spec: &PipelineSpec) -> ValidationResponse {
+    let engine = ValidationEngine::with_defaults();
+    let report = engine.validate(spec);
+    ValidationResponse {
+        valid: report.is_valid(),
+        report,
+    }
+}
+
 /// Extract keyphrases from JSON input
 ///
 /// Args:
-///     json_input: JSON string containing tokens and optional config
+///     json_input: JSON string containing tokens and optional config.
+///         When `validate_only` is true and `pipeline` is present,
+///         returns a validation report instead of extraction results.
 ///
 /// Returns:
-///     JSON string with extracted phrases
+///     JSON string with extracted phrases, or a validation report
 #[pyfunction]
 #[pyo3(signature = (json_input))]
 pub fn extract_from_json(json_input: &str) -> PyResult<String> {
     // Parse input
     let doc: JsonDocument = serde_json::from_str(json_input)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
+
+    // Handle validate-only mode
+    if doc.validate_only {
+        let pipeline_value = doc.pipeline.ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(
+                "validate_only requires a 'pipeline' field",
+            )
+        })?;
+        let spec: PipelineSpec = serde_json::from_value(pipeline_value).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid pipeline spec: {}", e))
+        })?;
+        let response = validate_spec_impl(&spec);
+        return serde_json::to_string(&response)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
+    }
 
     // Convert config
     let json_config = doc.config.unwrap_or_default();
@@ -350,6 +401,24 @@ pub fn extract_from_json(json_input: &str) -> PyResult<String> {
     };
 
     serde_json::to_string(&result)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+}
+
+/// Validate a pipeline specification without running extraction.
+///
+/// Args:
+///     json_spec: JSON string containing a PipelineSpec object.
+///
+/// Returns:
+///     JSON string with `{"valid": bool, "diagnostics": [...]}`
+#[pyfunction]
+#[pyo3(signature = (json_spec))]
+pub fn validate_pipeline_spec(json_spec: &str) -> PyResult<String> {
+    let spec: PipelineSpec = serde_json::from_str(json_spec).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid pipeline spec: {}", e))
+    })?;
+    let response = validate_spec_impl(&spec);
+    serde_json::to_string(&response)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
@@ -420,6 +489,101 @@ pub fn extract_batch_from_json(json_input: &str) -> PyResult<String> {
 mod tests {
     use super::*;
     use crate::graph::builder::GraphBuilder;
+    use crate::pipeline::spec::PipelineSpec;
+
+    // ─── Validate-only mode ─────────────────────────────────────────
+
+    #[test]
+    fn test_validate_spec_impl_valid() {
+        let spec: PipelineSpec = serde_json::from_str(r#"{
+            "v": 1,
+            "modules": {
+                "rank": "personalized_pagerank",
+                "teleport": "position"
+            }
+        }"#)
+        .unwrap();
+        let resp = validate_spec_impl(&spec);
+        assert!(resp.valid);
+        assert!(resp.report.is_empty());
+    }
+
+    #[test]
+    fn test_validate_spec_impl_invalid() {
+        let spec: PipelineSpec = serde_json::from_str(r#"{
+            "v": 1,
+            "modules": { "rank": "personalized_pagerank" }
+        }"#)
+        .unwrap();
+        let resp = validate_spec_impl(&spec);
+        assert!(!resp.valid);
+        assert!(resp.report.has_errors());
+    }
+
+    #[test]
+    fn test_validate_spec_impl_response_json_shape() {
+        let spec: PipelineSpec = serde_json::from_str(r#"{
+            "v": 1,
+            "modules": { "rank": "personalized_pagerank" }
+        }"#)
+        .unwrap();
+        let resp = validate_spec_impl(&spec);
+        let json = serde_json::to_value(&resp).unwrap();
+
+        // Check the top-level shape: { "valid": bool, "diagnostics": [...] }
+        assert_eq!(json["valid"], false);
+        let diags = json["diagnostics"].as_array().unwrap();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0]["severity"], "error");
+        assert_eq!(diags[0]["code"], "missing_stage");
+        assert_eq!(diags[0]["path"], "/modules/teleport");
+        assert!(diags[0]["hint"].as_str().is_some());
+    }
+
+    #[test]
+    fn test_validate_only_document_no_tokens_needed() {
+        // validate_only documents should not require tokens
+        let doc: JsonDocument = serde_json::from_str(r#"{
+            "validate_only": true,
+            "pipeline": { "v": 1, "modules": { "rank": "standard_pagerank" } }
+        }"#)
+        .unwrap();
+        assert!(doc.validate_only);
+        assert!(doc.tokens.is_empty());
+        assert!(doc.pipeline.is_some());
+    }
+
+    #[test]
+    fn test_validate_only_with_warnings() {
+        let spec: PipelineSpec = serde_json::from_str(r#"{
+            "v": 1,
+            "strict": false,
+            "bogus_field": 42
+        }"#)
+        .unwrap();
+        let resp = validate_spec_impl(&spec);
+        assert!(resp.valid); // warnings don't invalidate
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["valid"], true);
+        let diags = json["diagnostics"].as_array().unwrap();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0]["severity"], "warning");
+    }
+
+    #[test]
+    fn test_existing_extraction_still_works_with_new_fields() {
+        // Ensure adding pipeline/validate_only fields doesn't break existing behavior
+        let json_input = r#"{
+            "tokens": [
+                {"text": "machine", "lemma": "machine", "pos": "NOUN", "start": 0, "end": 7, "sentence_idx": 0, "token_idx": 0}
+            ],
+            "config": {}
+        }"#;
+        let doc: JsonDocument = serde_json::from_str(json_input).unwrap();
+        assert!(!doc.validate_only);
+        assert!(doc.pipeline.is_none());
+        assert_eq!(doc.tokens.len(), 1);
+    }
 
     #[test]
     fn test_json_include_pos_filtering() {

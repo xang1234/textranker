@@ -27,6 +27,7 @@ pub fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // JSON interface functions
     m.add_function(wrap_pyfunction!(json::extract_from_json, m)?)?;
     m.add_function(wrap_pyfunction!(json::extract_batch_from_json, m)?)?;
+    m.add_function(wrap_pyfunction!(json::validate_pipeline_spec, m)?)?;
 
     Ok(())
 }
