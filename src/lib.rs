@@ -40,6 +40,7 @@ pub use pagerank::{
 };
 pub use phrase::extraction::PhraseExtractor;
 pub use pipeline::error_code::ErrorCode;
+pub use pipeline::errors::{PipelineRuntimeError, PipelineSpecError};
 pub use summarizer::selector::SentenceSelector;
 pub use variants::{
     biased_textrank::BiasedTextRank, multipartite_rank::MultipartiteRank,

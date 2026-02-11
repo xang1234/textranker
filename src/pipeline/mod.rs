@@ -4,3 +4,4 @@
 //! error handling, and (in future phases) modular execution.
 
 pub mod error_code;
+pub mod errors;
