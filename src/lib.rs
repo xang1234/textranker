@@ -43,7 +43,10 @@ pub use pipeline::error_code::ErrorCode;
 pub use pipeline::errors::{PipelineRuntimeError, PipelineSpecError};
 pub use pipeline::spec::PipelineSpec;
 pub use pipeline::validation::{ValidationEngine, ValidationReport};
-pub use pipeline::{NoopPreprocessor, Preprocessor, TokenEntry, TokenStream, TokenStreamRef};
+pub use pipeline::{
+    CandidateSelector, NoopPreprocessor, PhraseCandidateSelector, Preprocessor, TokenEntry,
+    TokenStream, TokenStreamRef, WordNodeSelector,
+};
 pub use summarizer::selector::SentenceSelector;
 pub use variants::{
     biased_textrank::BiasedTextRank, multipartite_rank::MultipartiteRank,

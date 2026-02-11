@@ -27,4 +27,6 @@ pub use artifacts::{
 };
 
 // Re-export stage traits and default implementations.
-pub use traits::{NoopPreprocessor, Preprocessor};
+pub use traits::{
+    CandidateSelector, NoopPreprocessor, PhraseCandidateSelector, Preprocessor, WordNodeSelector,
+};

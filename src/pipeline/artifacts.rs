@@ -408,6 +408,14 @@ pub struct CandidateSet {
 }
 
 impl CandidateSet {
+    /// Construct from a pre-built [`CandidateKind`].
+    ///
+    /// This is the low-level constructor used by [`CandidateSelector`]
+    /// implementations that build candidates from [`TokenStreamRef`].
+    pub fn from_kind(kind: CandidateKind) -> Self {
+        Self { kind }
+    }
+
     /// Build a word-level candidate set from a token stream.
     ///
     /// Filters tokens by `include_pos` (or default content-word check when
