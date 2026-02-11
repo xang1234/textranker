@@ -577,12 +577,139 @@ impl<'a> CandidateSetRef<'a> {
     }
 }
 
-/// Pipeline-level graph artifact wrapping the CSR-backed adjacency + weights.
+// ============================================================================
+// Graph — pipeline artifact wrapping the CSR representation
+// ============================================================================
+
+/// Pipeline-level graph artifact wrapping the existing CSR-backed adjacency
+/// + weights.
 ///
-/// Includes a node-index mapping from internal candidate IDs to CSR indices,
-/// preserving cache-friendly iteration.
+/// This is a thin wrapper around [`CsrGraph`] that turns the graph into a
+/// first-class pipeline artifact.  The inner CSR storage is fully accessible
+/// for hot-path PageRank iteration, and the wrapper provides attachment
+/// points for metadata (transform history, observer hooks, etc.).
+///
+/// # Construction
+///
+/// Use [`Graph::from_builder`] to convert from an existing [`GraphBuilder`],
+/// or [`Graph::from_csr`] if you already have a [`CsrGraph`].
+#[derive(Debug, Clone)]
 pub struct Graph {
-    _private: (),
+    /// The underlying CSR graph.
+    csr: crate::graph::csr::CsrGraph,
+    /// Whether this graph has been modified by any [`GraphTransform`] stage.
+    ///
+    /// Set to `true` after transforms such as intra-cluster edge removal
+    /// (MultipartiteRank) or alpha-boost weighting.  Observers can use this
+    /// to log whether the graph they see is the original build or a
+    /// transformed variant.
+    transformed: bool,
+}
+
+impl Graph {
+    /// Build from an existing [`GraphBuilder`].
+    ///
+    /// This is the primary construction path — the existing graph builder
+    /// infrastructure produces a `GraphBuilder`, and this method converts it
+    /// to the pipeline artifact via [`CsrGraph::from_builder`].
+    pub fn from_builder(builder: &crate::graph::builder::GraphBuilder) -> Self {
+        Self {
+            csr: crate::graph::csr::CsrGraph::from_builder(builder),
+            transformed: false,
+        }
+    }
+
+    /// Wrap a pre-existing [`CsrGraph`].
+    pub fn from_csr(csr: crate::graph::csr::CsrGraph) -> Self {
+        Self {
+            csr,
+            transformed: false,
+        }
+    }
+
+    /// Access the inner CSR graph (immutable).
+    ///
+    /// Use this for hot-path operations like PageRank iteration where you
+    /// need direct access to the CSR arrays.
+    #[inline]
+    pub fn csr(&self) -> &crate::graph::csr::CsrGraph {
+        &self.csr
+    }
+
+    /// Mutable access to the inner CSR graph.
+    ///
+    /// Used by [`GraphTransform`] stages that modify edge weights in-place
+    /// (e.g., intra-cluster edge removal, alpha-boost weighting).
+    /// Automatically sets the `transformed` flag.
+    #[inline]
+    pub fn csr_mut(&mut self) -> &mut crate::graph::csr::CsrGraph {
+        self.transformed = true;
+        &mut self.csr
+    }
+
+    /// Consume this wrapper and return the inner [`CsrGraph`].
+    #[inline]
+    pub fn into_csr(self) -> crate::graph::csr::CsrGraph {
+        self.csr
+    }
+
+    /// Whether any transform stage has modified this graph.
+    #[inline]
+    pub fn is_transformed(&self) -> bool {
+        self.transformed
+    }
+
+    /// Mark this graph as transformed (e.g., after an external modification).
+    #[inline]
+    pub fn set_transformed(&mut self) {
+        self.transformed = true;
+    }
+
+    // ------------------------------------------------------------------
+    // Delegated convenience methods
+    // ------------------------------------------------------------------
+
+    /// Number of nodes.
+    #[inline]
+    pub fn num_nodes(&self) -> usize {
+        self.csr.num_nodes
+    }
+
+    /// Number of directed edge entries in the CSR arrays.
+    #[inline]
+    pub fn num_edges(&self) -> usize {
+        self.csr.num_edges()
+    }
+
+    /// Whether the graph has no nodes.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.csr.is_empty()
+    }
+
+    /// Look up a node by its graph key (lemma or `lemma|POS`).
+    #[inline]
+    pub fn get_node_by_lemma(&self, lemma: &str) -> Option<u32> {
+        self.csr.get_node_by_lemma(lemma)
+    }
+
+    /// Iterate over (neighbor_id, weight) pairs for a node.
+    #[inline]
+    pub fn neighbors(&self, node: u32) -> impl Iterator<Item = (u32, f64)> + '_ {
+        self.csr.neighbors(node)
+    }
+
+    /// Get the lemma / graph key for a node.
+    #[inline]
+    pub fn lemma(&self, node: u32) -> &str {
+        self.csr.lemma(node)
+    }
+
+    /// Dangling nodes (no outgoing edges).
+    #[inline]
+    pub fn dangling_nodes(&self) -> Vec<u32> {
+        self.csr.dangling_nodes()
+    }
 }
 
 /// PageRank output: per-node scores, convergence info, and optional diagnostics.
@@ -1051,5 +1178,147 @@ mod tests {
         }];
         let cs = CandidateSet::from_phrase_chunks(&stream, &chunks);
         let _ = cs.words(); // should panic
+    }
+
+    // ================================================================
+    // Graph artifact tests
+    // ================================================================
+
+    /// Helper: build a small graph via the existing builder.
+    fn sample_graph_builder() -> crate::graph::builder::GraphBuilder {
+        let mut builder = crate::graph::builder::GraphBuilder::new();
+        let a = builder.get_or_create_node("machine|NOUN");
+        let b = builder.get_or_create_node("learning|NOUN");
+        let c = builder.get_or_create_node("great|ADJ");
+        builder.increment_edge(a, b, 1.0);
+        builder.increment_edge(b, c, 1.0);
+        builder.increment_edge(a, c, 1.0);
+        builder
+    }
+
+    #[test]
+    fn test_graph_from_builder() {
+        let builder = sample_graph_builder();
+        let graph = Graph::from_builder(&builder);
+
+        assert_eq!(graph.num_nodes(), 3);
+        assert!(!graph.is_empty());
+        // Each undirected edge is stored in both directions → 6 directed entries.
+        assert_eq!(graph.num_edges(), 6);
+        assert!(!graph.is_transformed());
+    }
+
+    #[test]
+    fn test_graph_from_csr() {
+        let builder = sample_graph_builder();
+        let csr = crate::graph::csr::CsrGraph::from_builder(&builder);
+        let graph = Graph::from_csr(csr);
+
+        assert_eq!(graph.num_nodes(), 3);
+        assert!(!graph.is_transformed());
+    }
+
+    #[test]
+    fn test_graph_empty() {
+        let builder = crate::graph::builder::GraphBuilder::new();
+        let graph = Graph::from_builder(&builder);
+
+        assert!(graph.is_empty());
+        assert_eq!(graph.num_nodes(), 0);
+        assert_eq!(graph.num_edges(), 0);
+    }
+
+    #[test]
+    fn test_graph_node_lookup() {
+        let graph = Graph::from_builder(&sample_graph_builder());
+
+        assert_eq!(graph.get_node_by_lemma("machine|NOUN"), Some(0));
+        assert_eq!(graph.get_node_by_lemma("learning|NOUN"), Some(1));
+        assert_eq!(graph.get_node_by_lemma("great|ADJ"), Some(2));
+        assert_eq!(graph.get_node_by_lemma("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_graph_neighbors() {
+        let graph = Graph::from_builder(&sample_graph_builder());
+
+        // Node 0 ("machine|NOUN") should neighbor nodes 1 and 2.
+        let neighbors: Vec<(u32, f64)> = graph.neighbors(0).collect();
+        assert_eq!(neighbors.len(), 2);
+        let target_ids: Vec<u32> = neighbors.iter().map(|(id, _)| *id).collect();
+        assert!(target_ids.contains(&1));
+        assert!(target_ids.contains(&2));
+    }
+
+    #[test]
+    fn test_graph_lemma() {
+        let graph = Graph::from_builder(&sample_graph_builder());
+
+        assert_eq!(graph.lemma(0), "machine|NOUN");
+        assert_eq!(graph.lemma(1), "learning|NOUN");
+        assert_eq!(graph.lemma(2), "great|ADJ");
+    }
+
+    #[test]
+    fn test_graph_dangling_nodes() {
+        let mut builder = crate::graph::builder::GraphBuilder::new();
+        let a = builder.get_or_create_node("a");
+        let b = builder.get_or_create_node("b");
+        let _c = builder.get_or_create_node("c"); // dangling
+        builder.increment_edge(a, b, 1.0);
+
+        let graph = Graph::from_builder(&builder);
+        let dangling = graph.dangling_nodes();
+        assert!(dangling.contains(&2)); // "c" has no edges
+    }
+
+    #[test]
+    fn test_graph_transformed_flag() {
+        let mut graph = Graph::from_builder(&sample_graph_builder());
+
+        assert!(!graph.is_transformed());
+
+        // Accessing csr_mut should flip the flag.
+        let _ = graph.csr_mut();
+        assert!(graph.is_transformed());
+    }
+
+    #[test]
+    fn test_graph_set_transformed() {
+        let mut graph = Graph::from_builder(&sample_graph_builder());
+        assert!(!graph.is_transformed());
+
+        graph.set_transformed();
+        assert!(graph.is_transformed());
+    }
+
+    #[test]
+    fn test_graph_into_csr() {
+        let graph = Graph::from_builder(&sample_graph_builder());
+        let csr = graph.into_csr();
+
+        // Should still have the same data.
+        assert_eq!(csr.num_nodes, 3);
+        assert_eq!(csr.get_node_by_lemma("machine|NOUN"), Some(0));
+    }
+
+    #[test]
+    fn test_graph_csr_direct_access() {
+        let graph = Graph::from_builder(&sample_graph_builder());
+
+        // Direct CSR access for hot-path-style iteration.
+        let csr = graph.csr();
+        assert_eq!(csr.num_nodes, 3);
+        assert!((csr.node_total_weight(0) - 2.0).abs() < 1e-10); // edges to b and c, weight 1 each
+    }
+
+    #[test]
+    fn test_graph_clone() {
+        let graph = Graph::from_builder(&sample_graph_builder());
+        let cloned = graph.clone();
+
+        assert_eq!(cloned.num_nodes(), graph.num_nodes());
+        assert_eq!(cloned.num_edges(), graph.num_edges());
+        assert_eq!(cloned.is_transformed(), graph.is_transformed());
     }
 }
