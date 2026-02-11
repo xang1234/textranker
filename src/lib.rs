@@ -43,6 +43,7 @@ pub use pipeline::error_code::ErrorCode;
 pub use pipeline::errors::{PipelineRuntimeError, PipelineSpecError};
 pub use pipeline::spec::PipelineSpec;
 pub use pipeline::validation::{ValidationEngine, ValidationReport};
+pub use pipeline::{TokenEntry, TokenStream, TokenStreamRef};
 pub use summarizer::selector::SentenceSelector;
 pub use variants::{
     biased_textrank::BiasedTextRank, multipartite_rank::MultipartiteRank,
