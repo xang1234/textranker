@@ -44,9 +44,15 @@ pub use pipeline::errors::{PipelineRuntimeError, PipelineSpecError};
 pub use pipeline::spec::PipelineSpec;
 pub use pipeline::validation::{ValidationEngine, ValidationReport};
 pub use pipeline::{
-    CandidateSelector, NoopPreprocessor, PhraseCandidateSelector, Preprocessor, TokenEntry,
-    TokenStream, TokenStreamRef, WordNodeSelector,
+    CandidateSelector, CooccurrenceGraphBuilder, EdgeWeightPolicy, NoopGraphTransform,
+    NoopPreprocessor, PhraseCandidateSelector, Preprocessor, TeleportBuilder, TeleportVector,
+    TokenEntry, TokenStream, TokenStreamRef, UniformTeleportBuilder, WindowStrategy,
+    WordNodeSelector,
 };
+// Note: pipeline::GraphBuilder trait is NOT re-exported here to avoid
+// collision with graph::builder::GraphBuilder (the mutable builder struct).
+// Access the trait via `pipeline::GraphBuilder` or
+// `pipeline::traits::GraphBuilder`.
 pub use summarizer::selector::SentenceSelector;
 pub use variants::{
     biased_textrank::BiasedTextRank, multipartite_rank::MultipartiteRank,

@@ -23,10 +23,13 @@ pub mod validation;
 pub use artifacts::{
     CandidateKind, CandidateSet, CandidateSetRef, DebugPayload, FormattedResult, Graph,
     GraphStats, PhraseCandidate, PhraseEntry, PhraseSet, PhraseSetRef, PipelineWorkspace,
-    RankDiagnostics, RankOutput, TokenEntry, TokenStream, TokenStreamRef, WordCandidate,
+    RankDiagnostics, RankOutput, TeleportVector, TokenEntry, TokenStream, TokenStreamRef,
+    WordCandidate,
 };
 
 // Re-export stage traits and default implementations.
 pub use traits::{
-    CandidateSelector, NoopPreprocessor, PhraseCandidateSelector, Preprocessor, WordNodeSelector,
+    CandidateSelector, CooccurrenceGraphBuilder, EdgeWeightPolicy, GraphBuilder, GraphTransform,
+    NoopGraphTransform, NoopPreprocessor, PhraseCandidateSelector, Preprocessor, TeleportBuilder,
+    UniformTeleportBuilder, WindowStrategy, WordNodeSelector,
 };

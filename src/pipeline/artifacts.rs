@@ -740,6 +740,165 @@ impl Graph {
 }
 
 // ============================================================================
+// TeleportVector — personalization distribution for PageRank
+// ============================================================================
+
+/// A personalization (teleport) vector for PageRank.
+///
+/// Each entry `v[i]` is the teleport probability for CSR node `i`.  When used
+/// with Personalized PageRank, the random surfer jumps to node `i` with
+/// probability proportional to `v[i]` instead of uniformly.
+///
+/// # Normalization
+///
+/// Builders are responsible for producing a **normalized** vector (entries sum
+/// to 1.0).  Use [`TeleportVector::normalize`] if needed, or check with
+/// [`TeleportVector::is_normalized`].
+///
+/// # Construction
+///
+/// - [`TeleportVector::new`] — from a pre-built `Vec<f64>`
+/// - [`TeleportVector::uniform`] — uniform distribution of given length
+/// - [`TeleportVector::zeros`] — zero vector (for sparse construction)
+#[derive(Debug, Clone, PartialEq)]
+pub struct TeleportVector {
+    values: Vec<f64>,
+}
+
+impl TeleportVector {
+    /// Create from a raw probability vector.
+    ///
+    /// The caller is responsible for ensuring the vector has the correct
+    /// length (one entry per graph node) and is normalized.
+    #[inline]
+    pub fn new(values: Vec<f64>) -> Self {
+        Self { values }
+    }
+
+    /// Create a uniform distribution of length `n`.
+    ///
+    /// Each entry is `1.0 / n`.  Returns an empty vector when `n == 0`.
+    pub fn uniform(n: usize) -> Self {
+        if n == 0 {
+            return Self { values: Vec::new() };
+        }
+        Self {
+            values: vec![1.0 / n as f64; n],
+        }
+    }
+
+    /// Create a zero vector of length `n` for sparse construction.
+    ///
+    /// The caller should set individual entries and then call [`normalize`].
+    pub fn zeros(n: usize) -> Self {
+        Self {
+            values: vec![0.0; n],
+        }
+    }
+
+    /// Number of entries (should equal the number of graph nodes).
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Whether the vector is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// Borrow the underlying slice.
+    #[inline]
+    pub fn as_slice(&self) -> &[f64] {
+        &self.values
+    }
+
+    /// Mutable access to the underlying slice.
+    ///
+    /// Useful for sparse construction: create with [`zeros`], set individual
+    /// entries, then [`normalize`].
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [f64] {
+        &mut self.values
+    }
+
+    /// Get the value at index `i`, or `0.0` if out of bounds.
+    #[inline]
+    pub fn get(&self, i: usize) -> f64 {
+        self.values.get(i).copied().unwrap_or(0.0)
+    }
+
+    /// Set the value at index `i`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `i >= len()`.
+    #[inline]
+    pub fn set(&mut self, i: usize, value: f64) {
+        self.values[i] = value;
+    }
+
+    /// Check whether the vector sums to approximately 1.0.
+    pub fn is_normalized(&self, epsilon: f64) -> bool {
+        if self.values.is_empty() {
+            return true;
+        }
+        let sum: f64 = self.values.iter().sum();
+        (sum - 1.0).abs() < epsilon
+    }
+
+    /// Normalize in place so entries sum to 1.0.
+    ///
+    /// If the sum is zero (or the vector is empty), falls back to a uniform
+    /// distribution.
+    pub fn normalize(&mut self) {
+        if self.values.is_empty() {
+            return;
+        }
+        let sum: f64 = self.values.iter().sum();
+        if sum > 0.0 {
+            for v in &mut self.values {
+                *v /= sum;
+            }
+        } else {
+            let uniform = 1.0 / self.values.len() as f64;
+            for v in &mut self.values {
+                *v = uniform;
+            }
+        }
+    }
+
+    /// Consume and return the inner `Vec<f64>`.
+    #[inline]
+    pub fn into_inner(self) -> Vec<f64> {
+        self.values
+    }
+
+    /// Iterate over values.
+    #[inline]
+    pub fn iter(&self) -> std::slice::Iter<'_, f64> {
+        self.values.iter()
+    }
+}
+
+impl std::ops::Index<usize> for TeleportVector {
+    type Output = f64;
+
+    #[inline]
+    fn index(&self, index: usize) -> &f64 {
+        &self.values[index]
+    }
+}
+
+impl std::ops::IndexMut<usize> for TeleportVector {
+    #[inline]
+    fn index_mut(&mut self, index: usize) -> &mut f64 {
+        &mut self.values[index]
+    }
+}
+
+// ============================================================================
 // RankOutput — PageRank scores + convergence metadata
 // ============================================================================
 
@@ -1725,6 +1884,182 @@ mod tests {
         assert_eq!(cloned.num_nodes(), graph.num_nodes());
         assert_eq!(cloned.num_edges(), graph.num_edges());
         assert_eq!(cloned.is_transformed(), graph.is_transformed());
+    }
+
+    // ================================================================
+    // TeleportVector tests
+    // ================================================================
+
+    #[test]
+    fn test_teleport_vector_new() {
+        let tv = TeleportVector::new(vec![0.5, 0.3, 0.2]);
+
+        assert_eq!(tv.len(), 3);
+        assert!(!tv.is_empty());
+        assert_eq!(tv.as_slice(), &[0.5, 0.3, 0.2]);
+    }
+
+    #[test]
+    fn test_teleport_vector_uniform() {
+        let tv = TeleportVector::uniform(4);
+
+        assert_eq!(tv.len(), 4);
+        assert!(tv.is_normalized(1e-15));
+        for &v in tv.as_slice() {
+            assert!((v - 0.25).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn test_teleport_vector_uniform_zero() {
+        let tv = TeleportVector::uniform(0);
+
+        assert!(tv.is_empty());
+        assert_eq!(tv.len(), 0);
+        assert!(tv.is_normalized(1e-10));
+    }
+
+    #[test]
+    fn test_teleport_vector_zeros() {
+        let tv = TeleportVector::zeros(5);
+
+        assert_eq!(tv.len(), 5);
+        for &v in tv.as_slice() {
+            assert!(v.abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn test_teleport_vector_get() {
+        let tv = TeleportVector::new(vec![0.1, 0.9]);
+
+        assert!((tv.get(0) - 0.1).abs() < 1e-15);
+        assert!((tv.get(1) - 0.9).abs() < 1e-15);
+        // Out of bounds returns 0.0.
+        assert!(tv.get(99).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_teleport_vector_set() {
+        let mut tv = TeleportVector::zeros(3);
+
+        tv.set(0, 0.5);
+        tv.set(2, 0.5);
+
+        assert!((tv[0] - 0.5).abs() < 1e-15);
+        assert!(tv[1].abs() < 1e-15);
+        assert!((tv[2] - 0.5).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_teleport_vector_index() {
+        let tv = TeleportVector::new(vec![0.3, 0.7]);
+
+        assert!((tv[0] - 0.3).abs() < 1e-15);
+        assert!((tv[1] - 0.7).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_teleport_vector_index_mut() {
+        let mut tv = TeleportVector::new(vec![0.5, 0.5]);
+
+        tv[0] = 0.8;
+        tv[1] = 0.2;
+
+        assert!((tv[0] - 0.8).abs() < 1e-15);
+        assert!((tv[1] - 0.2).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_teleport_vector_is_normalized() {
+        let tv = TeleportVector::new(vec![0.5, 0.3, 0.2]);
+        assert!(tv.is_normalized(1e-10));
+
+        let tv2 = TeleportVector::new(vec![1.0, 1.0, 1.0]);
+        assert!(!tv2.is_normalized(1e-10));
+    }
+
+    #[test]
+    fn test_teleport_vector_normalize() {
+        let mut tv = TeleportVector::new(vec![2.0, 3.0, 5.0]);
+        tv.normalize();
+
+        assert!(tv.is_normalized(1e-10));
+        assert!((tv[0] - 0.2).abs() < 1e-10);
+        assert!((tv[1] - 0.3).abs() < 1e-10);
+        assert!((tv[2] - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_teleport_vector_normalize_zero_sum() {
+        let mut tv = TeleportVector::zeros(3);
+        tv.normalize();
+
+        // Falls back to uniform.
+        assert!(tv.is_normalized(1e-10));
+        for &v in tv.as_slice() {
+            assert!((v - 1.0 / 3.0).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_teleport_vector_normalize_empty() {
+        let mut tv = TeleportVector::new(vec![]);
+        tv.normalize();
+
+        assert!(tv.is_empty());
+        assert!(tv.is_normalized(1e-10));
+    }
+
+    #[test]
+    fn test_teleport_vector_into_inner() {
+        let tv = TeleportVector::new(vec![0.1, 0.2, 0.7]);
+        let inner = tv.into_inner();
+
+        assert_eq!(inner, vec![0.1, 0.2, 0.7]);
+    }
+
+    #[test]
+    fn test_teleport_vector_iter() {
+        let tv = TeleportVector::new(vec![0.3, 0.7]);
+        let sum: f64 = tv.iter().sum();
+
+        assert!((sum - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_teleport_vector_as_mut_slice() {
+        let mut tv = TeleportVector::zeros(3);
+        let slice = tv.as_mut_slice();
+        slice[0] = 0.5;
+        slice[1] = 0.3;
+        slice[2] = 0.2;
+
+        assert!(tv.is_normalized(1e-10));
+    }
+
+    #[test]
+    fn test_teleport_vector_clone_eq() {
+        let tv = TeleportVector::new(vec![0.25, 0.25, 0.5]);
+        let cloned = tv.clone();
+
+        assert_eq!(tv, cloned);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_teleport_vector_index_out_of_bounds() {
+        let tv = TeleportVector::new(vec![1.0]);
+        let _ = tv[5]; // should panic
+    }
+
+    #[test]
+    fn test_teleport_vector_single_node() {
+        let tv = TeleportVector::uniform(1);
+
+        assert_eq!(tv.len(), 1);
+        assert!((tv[0] - 1.0).abs() < 1e-15);
+        assert!(tv.is_normalized(1e-15));
     }
 
     // ================================================================
