@@ -24,10 +24,10 @@ use crate::pipeline::observer::{
     STAGE_TELEPORT,
 };
 use crate::pipeline::traits::{
-    CandidateSelector, ChunkPhraseBuilder, CooccurrenceGraphBuilder, FocusTermsTeleportBuilder,
-    GraphBuilder, GraphTransform, NoopGraphTransform, NoopPreprocessor, PageRankRanker,
-    PhraseBuilder, PositionTeleportBuilder, Preprocessor, Ranker, ResultFormatter,
-    StandardResultFormatter, TeleportBuilder, UniformTeleportBuilder, WordNodeSelector,
+    CandidateSelector, ChunkPhraseBuilder, FocusTermsTeleportBuilder, GraphBuilder, GraphTransform,
+    NoopGraphTransform, NoopPreprocessor, PageRankRanker, PhraseBuilder, PositionTeleportBuilder,
+    Preprocessor, Ranker, ResultFormatter, StandardResultFormatter, TeleportBuilder,
+    UniformTeleportBuilder, WindowGraphBuilder, WordNodeSelector,
 };
 use crate::types::TextRankConfig;
 
@@ -60,7 +60,7 @@ macro_rules! trace_stage {
 /// |-------|-------|--------------|
 /// | `Pre` | [`Preprocessor`] | [`NoopPreprocessor`] |
 /// | `Sel` | [`CandidateSelector`] | [`WordNodeSelector`] |
-/// | `GB`  | [`GraphBuilder`] | [`CooccurrenceGraphBuilder`] |
+/// | `GB`  | [`GraphBuilder`] | [`WindowGraphBuilder`] |
 /// | `GT`  | [`GraphTransform`] | [`NoopGraphTransform`] |
 /// | `TB`  | [`TeleportBuilder`] | [`UniformTeleportBuilder`] |
 /// | `Rnk` | [`Ranker`] | [`PageRankRanker`] |
@@ -82,7 +82,7 @@ pub struct Pipeline<Pre, Sel, GB, GT, TB, Rnk, PB, Fmt> {
 pub type BaseTextRankPipeline = Pipeline<
     NoopPreprocessor,
     WordNodeSelector,
-    CooccurrenceGraphBuilder,
+    WindowGraphBuilder,
     NoopGraphTransform,
     UniformTeleportBuilder,
     PageRankRanker,
@@ -106,7 +106,7 @@ impl BaseTextRankPipeline {
         Pipeline {
             preprocessor: NoopPreprocessor,
             selector: WordNodeSelector,
-            graph_builder: CooccurrenceGraphBuilder::default(),
+            graph_builder: WindowGraphBuilder::base_textrank(),
             graph_transform: NoopGraphTransform,
             teleport_builder: UniformTeleportBuilder,
             ranker: PageRankRanker,
@@ -123,7 +123,7 @@ impl BaseTextRankPipeline {
 pub type PositionRankPipeline = Pipeline<
     NoopPreprocessor,
     WordNodeSelector,
-    CooccurrenceGraphBuilder,
+    WindowGraphBuilder,
     NoopGraphTransform,
     PositionTeleportBuilder,
     PageRankRanker,
@@ -140,9 +140,49 @@ impl PositionRankPipeline {
         Pipeline {
             preprocessor: NoopPreprocessor,
             selector: WordNodeSelector,
-            graph_builder: CooccurrenceGraphBuilder::default(),
+            graph_builder: WindowGraphBuilder::base_textrank(),
             graph_transform: NoopGraphTransform,
             teleport_builder: PositionTeleportBuilder,
+            ranker: PageRankRanker,
+            phrase_builder: ChunkPhraseBuilder,
+            formatter: StandardResultFormatter,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SingleRankPipeline — cross-sentence windowing + count-accumulating weights
+// ---------------------------------------------------------------------------
+
+/// Pipeline alias for SingleRank: base pipeline with cross-sentence graph.
+///
+/// Structurally identical to [`BaseTextRankPipeline`] (same concrete types),
+/// but the factory method configures [`WindowGraphBuilder`] with
+/// [`WindowStrategy::CrossSentence`] + [`EdgeWeightPolicy::CountAccumulating`].
+pub type SingleRankPipeline = Pipeline<
+    NoopPreprocessor,
+    WordNodeSelector,
+    WindowGraphBuilder,
+    NoopGraphTransform,
+    UniformTeleportBuilder,
+    PageRankRanker,
+    ChunkPhraseBuilder,
+    StandardResultFormatter,
+>;
+
+impl SingleRankPipeline {
+    /// Build a pipeline for the SingleRank algorithm.
+    ///
+    /// Same as BaseTextRank but with cross-sentence windowing: the sliding
+    /// window ignores sentence boundaries, and co-occurrence counts
+    /// accumulate as edge weights.
+    pub fn single_rank() -> Self {
+        Pipeline {
+            preprocessor: NoopPreprocessor,
+            selector: WordNodeSelector,
+            graph_builder: WindowGraphBuilder::single_rank(),
+            graph_transform: NoopGraphTransform,
+            teleport_builder: UniformTeleportBuilder,
             ranker: PageRankRanker,
             phrase_builder: ChunkPhraseBuilder,
             formatter: StandardResultFormatter,
@@ -158,7 +198,7 @@ impl PositionRankPipeline {
 pub type BiasedTextRankPipeline = Pipeline<
     NoopPreprocessor,
     WordNodeSelector,
-    CooccurrenceGraphBuilder,
+    WindowGraphBuilder,
     NoopGraphTransform,
     FocusTermsTeleportBuilder,
     PageRankRanker,
@@ -176,7 +216,7 @@ impl BiasedTextRankPipeline {
         Pipeline {
             preprocessor: NoopPreprocessor,
             selector: WordNodeSelector,
-            graph_builder: CooccurrenceGraphBuilder::default(),
+            graph_builder: WindowGraphBuilder::base_textrank(),
             graph_transform: NoopGraphTransform,
             teleport_builder: FocusTermsTeleportBuilder::new(focus_terms, bias_weight),
             ranker: PageRankRanker,
@@ -325,10 +365,10 @@ where
 /// # use rapid_textrank::pipeline::runner::PipelineBuilder;
 /// # use rapid_textrank::pipeline::traits::*;
 /// let pipeline = PipelineBuilder::new()
-///     .graph_builder(CooccurrenceGraphBuilder::single_rank())
+///     .graph_builder(WindowGraphBuilder::single_rank())
 ///     .build();
 /// ```
-pub struct PipelineBuilder<Pre = NoopPreprocessor, Sel = WordNodeSelector, GB = CooccurrenceGraphBuilder, GT = NoopGraphTransform, TB = UniformTeleportBuilder, Rnk = PageRankRanker, PB = ChunkPhraseBuilder, Fmt = StandardResultFormatter> {
+pub struct PipelineBuilder<Pre = NoopPreprocessor, Sel = WordNodeSelector, GB = WindowGraphBuilder, GT = NoopGraphTransform, TB = UniformTeleportBuilder, Rnk = PageRankRanker, PB = ChunkPhraseBuilder, Fmt = StandardResultFormatter> {
     preprocessor: Pre,
     selector: Sel,
     graph_builder: GB,
@@ -345,7 +385,7 @@ impl PipelineBuilder {
         PipelineBuilder {
             preprocessor: NoopPreprocessor,
             selector: WordNodeSelector,
-            graph_builder: CooccurrenceGraphBuilder::default(),
+            graph_builder: WindowGraphBuilder::base_textrank(),
             graph_transform: NoopGraphTransform,
             teleport_builder: UniformTeleportBuilder,
             ranker: PageRankRanker,
@@ -583,12 +623,12 @@ mod tests {
     #[test]
     fn test_pipeline_builder_with_custom_graph() {
         let pipeline = PipelineBuilder::new()
-            .graph_builder(CooccurrenceGraphBuilder::single_rank())
+            .graph_builder(WindowGraphBuilder::single_rank())
             .build();
         // Verify it's the SingleRank config (cross-sentence, count weighting).
         assert_eq!(
             format!("{:?}", pipeline.graph_builder),
-            format!("{:?}", CooccurrenceGraphBuilder::single_rank())
+            format!("{:?}", WindowGraphBuilder::single_rank())
         );
     }
 
@@ -738,5 +778,333 @@ mod tests {
         assert!(obs.saw_graph, "on_graph not called");
         assert!(obs.saw_rank, "on_rank not called");
         assert!(obs.saw_phrases, "on_phrases not called");
+    }
+
+    // ================================================================
+    // Cross-path golden tests: pipeline vs legacy path
+    // ================================================================
+
+    /// Multi-sentence token set matching the golden tests in
+    /// `phrase/extraction.rs` — "Machine learning uses algorithms.
+    /// Deep learning uses neural networks. Machine learning models
+    /// improve with data."
+    fn golden_tokens() -> Vec<Token> {
+        let mut tokens = vec![
+            Token::new("Machine", "machine", PosTag::Noun, 0, 7, 0, 0),
+            Token::new("learning", "learning", PosTag::Noun, 8, 16, 0, 1),
+            Token::new("uses", "use", PosTag::Verb, 17, 21, 0, 2),
+            Token::new("algorithms", "algorithm", PosTag::Noun, 22, 32, 0, 3),
+            Token::new("Deep", "deep", PosTag::Adjective, 34, 38, 1, 4),
+            Token::new("learning", "learning", PosTag::Noun, 39, 47, 1, 5),
+            Token::new("uses", "use", PosTag::Verb, 48, 52, 1, 6),
+            Token::new("neural", "neural", PosTag::Adjective, 53, 59, 1, 7),
+            Token::new("networks", "network", PosTag::Noun, 60, 68, 1, 8),
+            Token::new("Machine", "machine", PosTag::Noun, 70, 77, 2, 9),
+            Token::new("learning", "learning", PosTag::Noun, 78, 86, 2, 10),
+            Token::new("models", "model", PosTag::Noun, 87, 93, 2, 11),
+            Token::new("improve", "improve", PosTag::Verb, 94, 101, 2, 12),
+            Token::new("with", "with", PosTag::Preposition, 102, 106, 2, 13),
+            Token::new("data", "data", PosTag::Noun, 107, 111, 2, 14),
+        ];
+        tokens[13].is_stopword = true; // "with"
+        tokens
+    }
+
+    /// Golden test: BaseTextRank pipeline produces identical output to the
+    /// legacy `extract_keyphrases_with_info` path.
+    ///
+    /// This validates that modularizing graph construction into
+    /// WindowGraphBuilder (SentenceBounded + Binary) preserves the exact
+    /// same behavior as the fused legacy code path.
+    #[test]
+    fn golden_base_textrank_pipeline_matches_legacy() {
+        use crate::phrase::extraction::extract_keyphrases_with_info;
+
+        let tokens = golden_tokens();
+        let cfg = TextRankConfig::default();
+
+        // Legacy path
+        let legacy = extract_keyphrases_with_info(&tokens, &cfg);
+
+        // Pipeline path
+        let stream = TokenStream::from_tokens(&tokens);
+        let mut obs = NoopObserver;
+        let pipeline_result = BaseTextRankPipeline::base_textrank().run(stream, &cfg, &mut obs);
+
+        // Convergence metadata must match.
+        assert_eq!(
+            legacy.converged, pipeline_result.converged,
+            "Convergence mismatch: legacy={}, pipeline={}",
+            legacy.converged, pipeline_result.converged
+        );
+        assert_eq!(
+            legacy.iterations, pipeline_result.iterations as usize,
+            "Iteration count mismatch: legacy={}, pipeline={}",
+            legacy.iterations, pipeline_result.iterations
+        );
+
+        // Phrase count must match.
+        assert_eq!(
+            legacy.phrases.len(),
+            pipeline_result.phrases.len(),
+            "Phrase count mismatch: legacy={}, pipeline={}",
+            legacy.phrases.len(),
+            pipeline_result.phrases.len()
+        );
+
+        // Every phrase must match: text, lemma, score, rank.
+        let eps = 1e-8;
+        for (i, (lp, pp)) in legacy
+            .phrases
+            .iter()
+            .zip(pipeline_result.phrases.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                lp.text, pp.text,
+                "Phrase text mismatch at position {i}: legacy={:?}, pipeline={:?}",
+                lp.text, pp.text
+            );
+            assert_eq!(
+                lp.lemma, pp.lemma,
+                "Phrase lemma mismatch at position {i}: legacy={:?}, pipeline={:?}",
+                lp.lemma, pp.lemma
+            );
+            assert!(
+                (lp.score - pp.score).abs() < eps,
+                "Score mismatch at position {i} ({:?}): legacy={:.10}, pipeline={:.10}, delta={:.2e}",
+                lp.text,
+                lp.score,
+                pp.score,
+                (lp.score - pp.score).abs()
+            );
+            assert_eq!(
+                lp.rank, pp.rank,
+                "Rank mismatch at position {i}: legacy={}, pipeline={}",
+                lp.rank, pp.rank
+            );
+        }
+    }
+
+    /// Golden test: single-sentence input also matches between paths.
+    #[test]
+    fn golden_base_textrank_pipeline_matches_legacy_single_sentence() {
+        use crate::phrase::extraction::extract_keyphrases_with_info;
+
+        let tokens = vec![
+            Token::new("Machine", "machine", PosTag::Noun, 0, 7, 0, 0),
+            Token::new("learning", "learning", PosTag::Noun, 8, 16, 0, 1),
+            Token::new("is", "be", PosTag::Verb, 17, 19, 0, 2),
+            Token::new("a", "a", PosTag::Determiner, 20, 21, 0, 3),
+            Token::new("subset", "subset", PosTag::Noun, 22, 28, 0, 4),
+            Token::new("of", "of", PosTag::Preposition, 29, 31, 0, 5),
+            Token::new("artificial", "artificial", PosTag::Adjective, 32, 42, 0, 6),
+            Token::new("intelligence", "intelligence", PosTag::Noun, 43, 55, 0, 7),
+        ];
+        let cfg = TextRankConfig::default();
+
+        let legacy = extract_keyphrases_with_info(&tokens, &cfg);
+        let stream = TokenStream::from_tokens(&tokens);
+        let mut obs = NoopObserver;
+        let pipeline_result = BaseTextRankPipeline::base_textrank().run(stream, &cfg, &mut obs);
+
+        assert_eq!(legacy.converged, pipeline_result.converged);
+        assert_eq!(legacy.iterations, pipeline_result.iterations as usize);
+        assert_eq!(legacy.phrases.len(), pipeline_result.phrases.len());
+
+        let eps = 1e-8;
+        for (i, (lp, pp)) in legacy
+            .phrases
+            .iter()
+            .zip(pipeline_result.phrases.iter())
+            .enumerate()
+        {
+            assert_eq!(lp.text, pp.text, "Text mismatch at {i}");
+            assert_eq!(lp.lemma, pp.lemma, "Lemma mismatch at {i}");
+            assert!(
+                (lp.score - pp.score).abs() < eps,
+                "Score mismatch at {i}: legacy={:.10}, pipeline={:.10}",
+                lp.score,
+                pp.score
+            );
+            assert_eq!(lp.rank, pp.rank, "Rank mismatch at {i}");
+        }
+    }
+
+    /// Golden test: empty input produces identical empty output from both paths.
+    #[test]
+    fn golden_base_textrank_pipeline_matches_legacy_empty() {
+        use crate::phrase::extraction::extract_keyphrases_with_info;
+
+        let tokens: Vec<Token> = Vec::new();
+        let cfg = TextRankConfig::default();
+
+        let legacy = extract_keyphrases_with_info(&tokens, &cfg);
+        let stream = TokenStream::from_tokens(&tokens);
+        let mut obs = NoopObserver;
+        let pipeline_result = BaseTextRankPipeline::base_textrank().run(stream, &cfg, &mut obs);
+
+        assert_eq!(legacy.converged, pipeline_result.converged);
+        assert!(legacy.phrases.is_empty());
+        assert!(pipeline_result.phrases.is_empty());
+    }
+
+    // ================================================================
+    // SingleRank golden tests: pipeline vs legacy direct path
+    // ================================================================
+
+    /// Golden test: SingleRank pipeline produces identical output to the
+    /// legacy direct graph-construction path.
+    ///
+    /// The legacy path (pre-refactor) used `GraphBuilder::from_tokens_with_pos_and_boundaries`
+    /// with `weighted=true, respect_sentence_boundaries=false`. This test
+    /// reconstructs that path inline and compares to `SingleRankPipeline`.
+    #[test]
+    fn golden_single_rank_pipeline_matches_legacy() {
+        use crate::graph::builder::GraphBuilder as LegacyGraphBuilder;
+        use crate::graph::csr::CsrGraph;
+        use crate::phrase::extraction::PhraseExtractor;
+        use super::SingleRankPipeline;
+
+        let tokens = golden_tokens();
+        let cfg = TextRankConfig::default();
+
+        // --- Legacy direct path (reconstructed) ---
+        let include_pos: Option<&[_]> = if cfg.include_pos.is_empty() {
+            None
+        } else {
+            Some(&cfg.include_pos)
+        };
+
+        let builder = LegacyGraphBuilder::from_tokens_with_pos_and_boundaries(
+            &tokens,
+            cfg.window_size,
+            true,  // always weighted
+            include_pos,
+            cfg.use_pos_in_nodes,
+            false, // cross-sentence windowing
+        );
+        let graph = CsrGraph::from_builder(&builder);
+        let pagerank = crate::pagerank::standard::StandardPageRank::new()
+            .with_damping(cfg.damping)
+            .with_max_iterations(cfg.max_iterations)
+            .with_threshold(cfg.convergence_threshold)
+            .run(&graph);
+        let extractor = PhraseExtractor::with_config(cfg.clone());
+        let legacy_phrases = extractor.extract(&tokens, &graph, &pagerank);
+
+        // --- Pipeline path ---
+        let stream = TokenStream::from_tokens(&tokens);
+        let mut obs = NoopObserver;
+        let pipeline_result = SingleRankPipeline::single_rank().run(stream, &cfg, &mut obs);
+
+        // Convergence metadata.
+        assert_eq!(
+            pagerank.converged, pipeline_result.converged,
+            "Convergence mismatch: legacy={}, pipeline={}",
+            pagerank.converged, pipeline_result.converged
+        );
+        assert_eq!(
+            pagerank.iterations, pipeline_result.iterations as usize,
+            "Iteration count mismatch: legacy={}, pipeline={}",
+            pagerank.iterations, pipeline_result.iterations
+        );
+
+        // Phrase count.
+        assert_eq!(
+            legacy_phrases.len(),
+            pipeline_result.phrases.len(),
+            "Phrase count mismatch: legacy={}, pipeline={}",
+            legacy_phrases.len(),
+            pipeline_result.phrases.len()
+        );
+
+        // Per-phrase exact match.
+        let eps = 1e-8;
+        for (i, (lp, pp)) in legacy_phrases
+            .iter()
+            .zip(pipeline_result.phrases.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                lp.text, pp.text,
+                "Text mismatch at {i}: legacy={:?}, pipeline={:?}",
+                lp.text, pp.text
+            );
+            assert_eq!(
+                lp.lemma, pp.lemma,
+                "Lemma mismatch at {i}: legacy={:?}, pipeline={:?}",
+                lp.lemma, pp.lemma
+            );
+            assert!(
+                (lp.score - pp.score).abs() < eps,
+                "Score mismatch at {i} ({:?}): legacy={:.10}, pipeline={:.10}, delta={:.2e}",
+                lp.text,
+                lp.score,
+                pp.score,
+                (lp.score - pp.score).abs()
+            );
+            assert_eq!(
+                lp.rank, pp.rank,
+                "Rank mismatch at {i}: legacy={}, pipeline={}",
+                lp.rank, pp.rank
+            );
+        }
+    }
+
+    /// Golden test: SingleRank pipeline with empty input returns empty.
+    #[test]
+    fn golden_single_rank_pipeline_empty() {
+        use super::SingleRankPipeline;
+
+        let tokens: Vec<Token> = Vec::new();
+        let cfg = TextRankConfig::default();
+        let stream = TokenStream::from_tokens(&tokens);
+        let mut obs = NoopObserver;
+
+        let result = SingleRankPipeline::single_rank().run(stream, &cfg, &mut obs);
+        assert!(result.phrases.is_empty());
+        assert!(result.converged);
+    }
+
+    /// Verify SingleRank pipeline produces different results from BaseTextRank
+    /// on multi-sentence input (cross-sentence edges change the graph).
+    #[test]
+    fn single_rank_differs_from_base_textrank_on_multi_sentence() {
+        use super::SingleRankPipeline;
+
+        let tokens = golden_tokens();
+        let cfg = TextRankConfig::default();
+
+        let base_result = {
+            let stream = TokenStream::from_tokens(&tokens);
+            let mut obs = NoopObserver;
+            BaseTextRankPipeline::base_textrank().run(stream, &cfg, &mut obs)
+        };
+
+        let single_result = {
+            let stream = TokenStream::from_tokens(&tokens);
+            let mut obs = NoopObserver;
+            SingleRankPipeline::single_rank().run(stream, &cfg, &mut obs)
+        };
+
+        // Both should produce phrases.
+        assert!(!base_result.phrases.is_empty());
+        assert!(!single_result.phrases.is_empty());
+
+        // They should differ: cross-sentence windowing creates additional
+        // edges that change the PageRank distribution. Compare scores to
+        // detect the difference (at least one phrase score must differ).
+        let any_diff = base_result
+            .phrases
+            .iter()
+            .zip(single_result.phrases.iter())
+            .any(|(b, s)| (b.score - s.score).abs() > 1e-10 || b.text != s.text);
+
+        assert!(
+            any_diff,
+            "SingleRank and BaseTextRank produced identical results on multi-sentence input; \
+             cross-sentence edges should cause a difference"
+        );
     }
 }

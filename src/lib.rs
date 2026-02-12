@@ -48,7 +48,8 @@ pub use pipeline::{
     FocusTermsTeleportBuilder, NoopGraphTransform, NoopPreprocessor, PhraseBuilder,
     PhraseCandidateSelector, PositionTeleportBuilder, Preprocessor, ResultFormatter,
     StandardResultFormatter, TeleportBuilder, TeleportType, TeleportVector, TokenEntry,
-    TokenStream, TokenStreamRef, UniformTeleportBuilder, WindowStrategy, WordNodeSelector,
+    TokenStream, TokenStreamRef, UniformTeleportBuilder, WindowGraphBuilder, WindowStrategy,
+    WordNodeSelector, DEFAULT_WINDOW_SIZE,
 };
 // Note: pipeline::GraphBuilder trait is NOT re-exported here to avoid
 // collision with graph::builder::GraphBuilder (the mutable builder struct).

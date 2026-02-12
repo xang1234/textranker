@@ -10,9 +10,10 @@
 //! The rest of the pipeline (standard PageRank, phrase extraction) is
 //! identical to base TextRank.
 
-use crate::graph::builder::GraphBuilder;
-use crate::graph::csr::CsrGraph;
-use crate::phrase::extraction::{ExtractionResult, PhraseExtractor};
+use crate::pipeline::artifacts::TokenStream;
+use crate::pipeline::observer::NoopObserver;
+use crate::pipeline::runner::SingleRankPipeline;
+use crate::phrase::extraction::ExtractionResult;
 use crate::types::{Phrase, TextRankConfig, Token};
 
 /// SingleRank implementation
@@ -47,46 +48,15 @@ impl SingleRank {
 
     /// Extract keyphrases with PageRank convergence information
     pub fn extract_with_info(&self, tokens: &[Token]) -> ExtractionResult {
-        let include_pos = if self.config.include_pos.is_empty() {
-            None
-        } else {
-            Some(self.config.include_pos.as_slice())
-        };
-
-        // SingleRank forces: weighted edges + cross-sentence windowing
-        let builder = GraphBuilder::from_tokens_with_pos_and_boundaries(
-            tokens,
-            self.config.window_size,
-            true, // always weighted co-occurrence counts
-            include_pos,
-            self.config.use_pos_in_nodes,
-            false, // ignore sentence boundaries
-        );
-
-        if builder.is_empty() {
-            return ExtractionResult {
-                phrases: Vec::new(),
-                converged: true,
-                iterations: 0,
-            };
-        }
-
-        let graph = CsrGraph::from_builder(&builder);
-
-        // Standard (unpersonalized) PageRank — same as base TextRank
-        let pagerank = crate::pagerank::standard::StandardPageRank::new()
-            .with_damping(self.config.damping)
-            .with_max_iterations(self.config.max_iterations)
-            .with_threshold(self.config.convergence_threshold)
-            .run(&graph);
-
-        let extractor = PhraseExtractor::with_config(self.config.clone());
-        let phrases = extractor.extract(tokens, &graph, &pagerank);
+        let pipeline = SingleRankPipeline::single_rank();
+        let stream = TokenStream::from_tokens(tokens);
+        let mut obs = NoopObserver;
+        let result = pipeline.run(stream, &self.config, &mut obs);
 
         ExtractionResult {
-            phrases,
-            converged: pagerank.converged,
-            iterations: pagerank.iterations,
+            phrases: result.phrases,
+            converged: result.converged,
+            iterations: result.iterations as usize,
         }
     }
 }

@@ -10,6 +10,7 @@ use crate::pipeline::artifacts::{
     TokenStreamRef, WordCandidate,
 };
 use crate::types::{ChunkSpan, PosTag, TextRankConfig};
+use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // Preprocessor — optional token normalization (stage 0)
@@ -207,28 +208,110 @@ impl CandidateSelector for PhraseCandidateSelector {
 /// Windowing strategy for co-occurrence graph construction.
 ///
 /// Controls whether the sliding window respects sentence boundaries or spans
-/// the entire document.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// the entire document, and embeds the configurable window size.
+///
+/// # Serde
+///
+/// Serializes with an internally-tagged representation (`"type"` discriminator):
+///
+/// ```json
+/// { "type": "sentence_bounded", "window_size": 3 }
+/// { "type": "cross_sentence",   "window_size": 5 }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum WindowStrategy {
     /// Window slides within each sentence independently (default for
     /// BaseTextRank, PositionRank, BiasedTextRank).
-    SentenceBounded,
+    SentenceBounded {
+        /// Number of tokens ahead to consider for co-occurrence edges.
+        window_size: usize,
+    },
     /// Window slides across the entire candidate sequence, ignoring sentence
     /// boundaries (used by SingleRank, TopicalPageRank).
-    CrossSentence,
+    CrossSentence {
+        /// Number of tokens ahead to consider for co-occurrence edges.
+        window_size: usize,
+    },
+}
+
+/// Default window size used when constructing a `WindowStrategy` without an
+/// explicit size (matches [`TextRankConfig::default().window_size`]).
+pub const DEFAULT_WINDOW_SIZE: usize = 3;
+
+impl Default for WindowStrategy {
+    /// Sentence-bounded with the default window size (3).
+    fn default() -> Self {
+        Self::SentenceBounded {
+            window_size: DEFAULT_WINDOW_SIZE,
+        }
+    }
+}
+
+impl WindowStrategy {
+    /// Return the window size embedded in this strategy.
+    pub fn window_size(&self) -> usize {
+        match self {
+            Self::SentenceBounded { window_size } | Self::CrossSentence { window_size } => {
+                *window_size
+            }
+        }
+    }
+
+    /// Returns `true` if this is the sentence-bounded variant.
+    pub fn is_sentence_bounded(&self) -> bool {
+        matches!(self, Self::SentenceBounded { .. })
+    }
+
+    /// Returns `true` if this is the cross-sentence variant.
+    pub fn is_cross_sentence(&self) -> bool {
+        matches!(self, Self::CrossSentence { .. })
+    }
 }
 
 /// Edge weight policy for co-occurrence graph construction.
 ///
 /// Controls whether repeated co-occurrences within the window accumulate
 /// weight or produce binary (0/1) edges.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// # Serde
+///
+/// Serializes as a lowercase string:
+///
+/// ```json
+/// "binary"
+/// "count_accumulating"
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EdgeWeightPolicy {
     /// Edge weight is 1.0 if any co-occurrence exists (default for
-    /// BaseTextRank).
+    /// BaseTextRank). Duplicate co-occurrences within the window are
+    /// idempotent — the edge is set, not incremented.
     Binary,
-    /// Edge weight accumulates co-occurrence count (used by SingleRank).
-    Count,
+    /// Edge weight accumulates (+= 1.0) for each co-occurrence within the
+    /// window (used by SingleRank). Multiple hits between the same pair
+    /// produce higher weights, capturing co-occurrence frequency.
+    CountAccumulating,
+}
+
+impl Default for EdgeWeightPolicy {
+    /// Binary is the default (BaseTextRank behavior).
+    fn default() -> Self {
+        Self::Binary
+    }
+}
+
+impl EdgeWeightPolicy {
+    /// Returns `true` if this is the binary (idempotent) policy.
+    pub fn is_binary(&self) -> bool {
+        matches!(self, Self::Binary)
+    }
+
+    /// Returns `true` if this is the count-accumulating policy.
+    pub fn is_count_accumulating(&self) -> bool {
+        matches!(self, Self::CountAccumulating)
+    }
 }
 
 /// Builds a co-occurrence graph from tokens and pre-selected candidates.
@@ -244,7 +327,7 @@ pub enum EdgeWeightPolicy {
 /// - **Edge weight policy**: binary (BaseTextRank) vs count-accumulating
 ///   (SingleRank) — see [`EdgeWeightPolicy`].
 ///
-/// The provided [`CooccurrenceGraphBuilder`] covers both families via
+/// The provided [`WindowGraphBuilder`] covers both families via
 /// configuration. Custom implementations can override this trait for entirely
 /// different graph construction strategies (e.g., topic-level graphs for
 /// TopicRank).
@@ -268,60 +351,84 @@ pub trait GraphBuilder {
     ) -> Graph;
 }
 
-/// Windowed co-occurrence graph builder for the word-graph TextRank family.
+/// Composable windowed graph builder for the word-graph TextRank family.
+///
+/// Combines a [`WindowStrategy`] (sentence-bounded vs cross-sentence, with
+/// embedded window size) and an [`EdgeWeightPolicy`] (binary vs
+/// count-accumulating) into a single parameterized [`GraphBuilder`].
 ///
 /// This is the primary [`GraphBuilder`] implementation, covering BaseTextRank,
-/// PositionRank, BiasedTextRank, SingleRank, and TopicalPageRank through the
-/// [`WindowStrategy`] and [`EdgeWeightPolicy`] configuration axes.
+/// PositionRank, BiasedTextRank, SingleRank, and TopicalPageRank through its
+/// two configuration axes.
 ///
 /// # How it works
 ///
 /// 1. Build a lookup set from the candidate words (fast `O(1)` membership).
 /// 2. Walk the token stream in document order, collecting candidate
 ///    occurrences with their graph keys and sentence indices.
-/// 3. Slide a window of size [`TextRankConfig::window_size`] over these
+/// 3. Slide a window of size [`WindowStrategy::window_size()`] over these
 ///    occurrences, creating undirected edges in the underlying
 ///    [`GraphBuilder`](crate::graph::builder::GraphBuilder) (the mutable
 ///    edge-accumulation struct).
 /// 4. Convert to the pipeline [`Graph`] artifact (CSR-backed).
+///
+/// # Presets
+///
+/// - [`WindowGraphBuilder::base_textrank()`] — sentence-bounded + binary
+/// - [`WindowGraphBuilder::single_rank()`] — cross-sentence + count-accumulating
 ///
 /// # Default
 ///
 /// `Default` produces the BaseTextRank configuration: sentence-bounded
 /// windowing with binary edge weights.
 #[derive(Debug, Clone, Copy)]
-pub struct CooccurrenceGraphBuilder {
+pub struct WindowGraphBuilder {
     /// Windowing behavior (sentence-bounded vs cross-sentence).
     pub window_strategy: WindowStrategy,
     /// Edge weight policy (binary vs count-accumulating).
     pub edge_weight_policy: EdgeWeightPolicy,
 }
 
-impl Default for CooccurrenceGraphBuilder {
+/// Backward-compatible alias for [`WindowGraphBuilder`].
+pub type CooccurrenceGraphBuilder = WindowGraphBuilder;
+
+impl Default for WindowGraphBuilder {
     fn default() -> Self {
         Self {
-            window_strategy: WindowStrategy::SentenceBounded,
-            edge_weight_policy: EdgeWeightPolicy::Binary,
+            window_strategy: WindowStrategy::default(),
+            edge_weight_policy: EdgeWeightPolicy::default(),
         }
     }
 }
 
-impl CooccurrenceGraphBuilder {
-    /// BaseTextRank configuration: sentence-bounded + binary.
+impl WindowGraphBuilder {
+    /// BaseTextRank configuration: sentence-bounded + count-accumulating.
+    ///
+    /// This matches the library's default behavior (`use_edge_weights = true`
+    /// in [`TextRankConfig`]). Co-occurrence counts accumulate as edge
+    /// weights, even within sentence-bounded windows.
+    ///
+    /// For the paper-standard binary-edge variant, construct with
+    /// [`EdgeWeightPolicy::Binary`] explicitly.
     pub fn base_textrank() -> Self {
-        Self::default()
+        Self {
+            window_strategy: WindowStrategy::default(),
+            edge_weight_policy: EdgeWeightPolicy::CountAccumulating,
+        }
     }
 
     /// SingleRank configuration: cross-sentence + count-accumulating.
     pub fn single_rank() -> Self {
         Self {
-            window_strategy: WindowStrategy::CrossSentence,
-            edge_weight_policy: EdgeWeightPolicy::Count,
+            window_strategy: WindowStrategy::CrossSentence {
+                window_size: DEFAULT_WINDOW_SIZE,
+            },
+            edge_weight_policy: EdgeWeightPolicy::CountAccumulating,
         }
     }
 }
 
-impl GraphBuilder for CooccurrenceGraphBuilder {
+impl GraphBuilder for WindowGraphBuilder {
     fn build(
         &self,
         tokens: TokenStreamRef<'_>,
@@ -375,8 +482,10 @@ impl GraphBuilder for CooccurrenceGraphBuilder {
         // Build edges via the mutable GraphBuilder.
         let mut builder = crate::graph::builder::GraphBuilder::with_capacity(key_strings.len());
 
+        let window_size = self.window_strategy.window_size();
+
         match self.window_strategy {
-            WindowStrategy::SentenceBounded => {
+            WindowStrategy::SentenceBounded { .. } => {
                 let mut i = 0;
                 while i < occurrences.len() {
                     let sent_idx = occurrences[i].0;
@@ -388,14 +497,14 @@ impl GraphBuilder for CooccurrenceGraphBuilder {
 
                     for j in sent_start..sent_end {
                         let node_j = builder.get_or_create_node(&occurrences[j].1);
-                        let window_end = std::cmp::min(j + cfg.window_size, sent_end);
+                        let window_end = std::cmp::min(j + window_size, sent_end);
                         for k in (j + 1)..window_end {
                             let node_k = builder.get_or_create_node(&occurrences[k].1);
                             match self.edge_weight_policy {
                                 EdgeWeightPolicy::Binary => {
                                     builder.set_edge(node_j, node_k, 1.0);
                                 }
-                                EdgeWeightPolicy::Count => {
+                                EdgeWeightPolicy::CountAccumulating => {
                                     builder.increment_edge(node_j, node_k, 1.0);
                                 }
                             }
@@ -403,17 +512,17 @@ impl GraphBuilder for CooccurrenceGraphBuilder {
                     }
                 }
             }
-            WindowStrategy::CrossSentence => {
+            WindowStrategy::CrossSentence { .. } => {
                 for j in 0..occurrences.len() {
                     let node_j = builder.get_or_create_node(&occurrences[j].1);
-                    let window_end = std::cmp::min(j + cfg.window_size, occurrences.len());
+                    let window_end = std::cmp::min(j + window_size, occurrences.len());
                     for k in (j + 1)..window_end {
                         let node_k = builder.get_or_create_node(&occurrences[k].1);
                         match self.edge_weight_policy {
                             EdgeWeightPolicy::Binary => {
                                 builder.set_edge(node_j, node_k, 1.0);
                             }
-                            EdgeWeightPolicy::Count => {
+                            EdgeWeightPolicy::CountAccumulating => {
                                 builder.increment_edge(node_j, node_k, 1.0);
                             }
                         }
@@ -1420,7 +1529,7 @@ mod tests {
     }
 
     // ================================================================
-    // GraphBuilder — CooccurrenceGraphBuilder tests
+    // GraphBuilder — WindowGraphBuilder tests
     // ================================================================
 
     /// Helper: build word candidates from a token stream using default config.
@@ -1429,8 +1538,8 @@ mod tests {
     }
 
     #[test]
-    fn test_graph_builder_sentence_bounded_binary() {
-        // BaseTextRank default: sentence-bounded + binary edges.
+    fn test_graph_builder_base_textrank_sentence_bounded() {
+        // BaseTextRank: sentence-bounded + count-accumulating (library default).
         let tokens = rich_tokens(); // 2 sentences, stopwords on "is"
         let stream = TokenStream::from_tokens(&tokens);
         let cfg = TextRankConfig::default(); // window_size = 3
@@ -1485,7 +1594,10 @@ mod tests {
         cfg.window_size = 10; // Large window to stress the boundary.
         let cs = word_candidates(&stream, &cfg);
 
-        let gb = CooccurrenceGraphBuilder::base_textrank();
+        let gb = CooccurrenceGraphBuilder {
+            window_strategy: WindowStrategy::SentenceBounded { window_size: 10 },
+            edge_weight_policy: EdgeWeightPolicy::Binary,
+        };
         let graph = gb.build(stream.as_ref(), cs.as_ref(), &cfg);
 
         let great_id = graph.get_node_by_lemma("great|ADJ").unwrap();
@@ -1548,7 +1660,7 @@ mod tests {
         let cs = word_candidates(&stream, &cfg);
 
         let gb = CooccurrenceGraphBuilder {
-            window_strategy: WindowStrategy::SentenceBounded,
+            window_strategy: WindowStrategy::SentenceBounded { window_size: 2 },
             edge_weight_policy: EdgeWeightPolicy::Binary,
         };
         let graph = gb.build(stream.as_ref(), cs.as_ref(), &cfg);
@@ -1578,8 +1690,8 @@ mod tests {
         let cs = word_candidates(&stream, &cfg);
 
         let gb = CooccurrenceGraphBuilder {
-            window_strategy: WindowStrategy::SentenceBounded,
-            edge_weight_policy: EdgeWeightPolicy::Count,
+            window_strategy: WindowStrategy::SentenceBounded { window_size: 2 },
+            edge_weight_policy: EdgeWeightPolicy::CountAccumulating,
         };
         let graph = gb.build(stream.as_ref(), cs.as_ref(), &cfg);
 
@@ -1607,11 +1719,13 @@ mod tests {
             Token::new("test", "test", PosTag::Noun, 12, 16, 0, 2),
         ];
         let stream = TokenStream::from_tokens(&tokens);
-        let mut cfg = TextRankConfig::default();
-        cfg.window_size = 2;
+        let cfg = TextRankConfig::default();
         let cs = word_candidates(&stream, &cfg);
 
-        let gb = CooccurrenceGraphBuilder::default();
+        let gb = CooccurrenceGraphBuilder {
+            window_strategy: WindowStrategy::SentenceBounded { window_size: 2 },
+            edge_weight_policy: EdgeWeightPolicy::Binary,
+        };
         let graph = gb.build(stream.as_ref(), cs.as_ref(), &cfg);
 
         assert_eq!(graph.num_nodes(), 3);
@@ -1674,7 +1788,7 @@ mod tests {
     #[test]
     fn test_graph_builder_phrase_candidates_returns_empty() {
         // Phrase-level candidates should produce an empty graph from
-        // CooccurrenceGraphBuilder (topic graphs are a separate stage).
+        // WindowGraphBuilder (topic graphs are a separate stage).
         let tokens = vec![
             Token::new("machine", "machine", PosTag::Noun, 0, 7, 0, 0),
             Token::new("learning", "learning", PosTag::Noun, 8, 16, 0, 1),
@@ -1712,10 +1826,29 @@ mod tests {
     }
 
     #[test]
-    fn test_graph_builder_default_is_base_textrank() {
-        let gb = CooccurrenceGraphBuilder::default();
-        assert_eq!(gb.window_strategy, WindowStrategy::SentenceBounded);
+    fn test_graph_builder_default_is_sentence_bounded_binary() {
+        let gb = WindowGraphBuilder::default();
+        assert_eq!(
+            gb.window_strategy,
+            WindowStrategy::SentenceBounded {
+                window_size: DEFAULT_WINDOW_SIZE
+            }
+        );
         assert_eq!(gb.edge_weight_policy, EdgeWeightPolicy::Binary);
+    }
+
+    #[test]
+    fn test_graph_builder_base_textrank_is_sentence_bounded_count() {
+        // base_textrank() matches the library's default config
+        // (use_edge_weights=true → CountAccumulating).
+        let gb = WindowGraphBuilder::base_textrank();
+        assert_eq!(
+            gb.window_strategy,
+            WindowStrategy::SentenceBounded {
+                window_size: DEFAULT_WINDOW_SIZE
+            }
+        );
+        assert_eq!(gb.edge_weight_policy, EdgeWeightPolicy::CountAccumulating);
     }
 
     #[test]
@@ -1728,11 +1861,13 @@ mod tests {
             Token::new("d", "d", PosTag::Noun, 6, 7, 0, 3),
         ];
         let stream = TokenStream::from_tokens(&tokens);
-        let mut cfg = TextRankConfig::default();
-        cfg.window_size = 2;
+        let cfg = TextRankConfig::default();
         let cs = word_candidates(&stream, &cfg);
 
-        let gb = CooccurrenceGraphBuilder::default();
+        let gb = CooccurrenceGraphBuilder {
+            window_strategy: WindowStrategy::SentenceBounded { window_size: 2 },
+            edge_weight_policy: EdgeWeightPolicy::Binary,
+        };
         let graph = gb.build(stream.as_ref(), cs.as_ref(), &cfg);
 
         assert_eq!(graph.num_nodes(), 4);
@@ -1762,11 +1897,13 @@ mod tests {
             Token::new("learning", "learning", PosTag::Noun, 42, 50, 2, 5),
         ];
         let stream = TokenStream::from_tokens(&tokens);
-        let mut cfg = TextRankConfig::default();
-        cfg.window_size = 2;
+        let cfg = TextRankConfig::default();
         let cs = word_candidates(&stream, &cfg);
 
-        let gb = CooccurrenceGraphBuilder::single_rank();
+        let gb = CooccurrenceGraphBuilder {
+            window_strategy: WindowStrategy::CrossSentence { window_size: 2 },
+            edge_weight_policy: EdgeWeightPolicy::CountAccumulating,
+        };
         let graph = gb.build(stream.as_ref(), cs.as_ref(), &cfg);
 
         let machine_id = graph.get_node_by_lemma("machine|NOUN").unwrap();
@@ -1946,12 +2083,14 @@ mod tests {
             Token::new("world", "world", PosTag::Noun, 6, 11, 0, 1),
         ];
         let stream = TokenStream::from_tokens(&tokens);
-        let mut cfg = TextRankConfig::default();
-        cfg.window_size = 2;
+        let cfg = TextRankConfig::default();
         let cs = word_candidates(&stream, &cfg);
 
         // Order A: double then add1 → 1.0 * 2 + 1 = 3.0
-        let gb = CooccurrenceGraphBuilder::default();
+        let gb = CooccurrenceGraphBuilder {
+            window_strategy: WindowStrategy::SentenceBounded { window_size: 2 },
+            edge_weight_policy: EdgeWeightPolicy::Binary,
+        };
         let mut graph_a = gb.build(stream.as_ref(), cs.as_ref(), &cfg);
 
         let transforms_a: Vec<Box<dyn GraphTransform>> = vec![
@@ -3726,5 +3865,104 @@ mod tests {
                 "Scores should be identical across runs"
             );
         }
+    }
+
+    // ================================================================
+    // WindowStrategy — serde round-trip tests
+    // ================================================================
+
+    #[test]
+    fn test_window_strategy_serde_sentence_bounded() {
+        let ws = WindowStrategy::SentenceBounded { window_size: 3 };
+        let json = serde_json::to_string(&ws).unwrap();
+        assert!(json.contains("\"type\":\"sentence_bounded\""));
+        assert!(json.contains("\"window_size\":3"));
+
+        let deser: WindowStrategy = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, ws);
+    }
+
+    #[test]
+    fn test_window_strategy_serde_cross_sentence() {
+        let ws = WindowStrategy::CrossSentence { window_size: 5 };
+        let json = serde_json::to_string(&ws).unwrap();
+        assert!(json.contains("\"type\":\"cross_sentence\""));
+        assert!(json.contains("\"window_size\":5"));
+
+        let deser: WindowStrategy = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, ws);
+    }
+
+    #[test]
+    fn test_window_strategy_serde_from_json_literal() {
+        let json = r#"{"type":"sentence_bounded","window_size":7}"#;
+        let ws: WindowStrategy = serde_json::from_str(json).unwrap();
+        assert_eq!(ws, WindowStrategy::SentenceBounded { window_size: 7 });
+        assert_eq!(ws.window_size(), 7);
+        assert!(ws.is_sentence_bounded());
+        assert!(!ws.is_cross_sentence());
+    }
+
+    #[test]
+    fn test_window_strategy_default() {
+        let ws = WindowStrategy::default();
+        assert_eq!(ws.window_size(), DEFAULT_WINDOW_SIZE);
+        assert!(ws.is_sentence_bounded());
+    }
+
+    #[test]
+    fn test_window_strategy_accessors() {
+        let sb = WindowStrategy::SentenceBounded { window_size: 4 };
+        assert_eq!(sb.window_size(), 4);
+        assert!(sb.is_sentence_bounded());
+        assert!(!sb.is_cross_sentence());
+
+        let cs = WindowStrategy::CrossSentence { window_size: 6 };
+        assert_eq!(cs.window_size(), 6);
+        assert!(!cs.is_sentence_bounded());
+        assert!(cs.is_cross_sentence());
+    }
+
+    // ================================================================
+    // EdgeWeightPolicy — serde round-trip tests
+    // ================================================================
+
+    #[test]
+    fn test_edge_weight_policy_serde_binary() {
+        let p = EdgeWeightPolicy::Binary;
+        let json = serde_json::to_string(&p).unwrap();
+        assert_eq!(json, "\"binary\"");
+
+        let deser: EdgeWeightPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, p);
+    }
+
+    #[test]
+    fn test_edge_weight_policy_serde_count_accumulating() {
+        let p = EdgeWeightPolicy::CountAccumulating;
+        let json = serde_json::to_string(&p).unwrap();
+        assert_eq!(json, "\"count_accumulating\"");
+
+        let deser: EdgeWeightPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, p);
+    }
+
+    #[test]
+    fn test_edge_weight_policy_serde_from_json_literal() {
+        let p: EdgeWeightPolicy = serde_json::from_str("\"binary\"").unwrap();
+        assert_eq!(p, EdgeWeightPolicy::Binary);
+        assert!(p.is_binary());
+
+        let p2: EdgeWeightPolicy = serde_json::from_str("\"count_accumulating\"").unwrap();
+        assert_eq!(p2, EdgeWeightPolicy::CountAccumulating);
+        assert!(p2.is_count_accumulating());
+    }
+
+    #[test]
+    fn test_edge_weight_policy_default() {
+        let p = EdgeWeightPolicy::default();
+        assert_eq!(p, EdgeWeightPolicy::Binary);
+        assert!(p.is_binary());
+        assert!(!p.is_count_accumulating());
     }
 }
