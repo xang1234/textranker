@@ -46,9 +46,9 @@ pub use pipeline::spec::{PipelineSpec, RuntimeSpec};
 pub use pipeline::validation::{ValidationEngine, ValidationReport};
 pub use pipeline::{
     CandidateSelector, ChunkPhraseBuilder, ClusterAssignments, Clusterer,
-    CooccurrenceGraphBuilder, EdgeWeightPolicy, FocusTermsTeleportBuilder, JaccardHacClusterer,
-    NoopClusterer, NoopGraphTransform, NoopPreprocessor, PhraseBuilder,
-    TopicWeightsTeleportBuilder, TopicalPageRankPipeline,
+    CooccurrenceGraphBuilder, EdgeWeightPolicy, FocusTermsTeleportBuilder,
+    IntraTopicEdgeRemover, JaccardHacClusterer, NoopClusterer, NoopGraphTransform,
+    NoopPreprocessor, PhraseBuilder, TopicWeightsTeleportBuilder, TopicalPageRankPipeline,
     PhraseCandidateSelector, PositionTeleportBuilder, Preprocessor, ResultFormatter,
     StandardResultFormatter, TeleportBuilder, TeleportType, TeleportVector, TokenEntry,
     TokenStream, TokenStreamRef, UniformTeleportBuilder, WindowGraphBuilder, WindowStrategy,

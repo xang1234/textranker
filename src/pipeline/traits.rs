@@ -598,6 +598,97 @@ impl GraphTransform for NoopGraphTransform {
     }
 }
 
+/// Removes intra-topic edges from a graph to form a k-partite structure.
+///
+/// Used by MultipartiteRank (and composable into TopicRank pipelines) to
+/// force PageRank flow **between** topic clusters rather than within them.
+/// For each edge `(u, v)`, if `cluster_of(u) == cluster_of(v)`, the edge
+/// weight is zeroed out and the node's `out_degree` / `total_weight` are
+/// recalculated.
+///
+/// # Construction
+///
+/// Takes a [`ClusterAssignments`] that maps graph node indices to cluster
+/// IDs.  In the topic pipeline, node `i` corresponds to phrase candidate
+/// `i`, so the assignments from the [`Clusterer`] stage map directly.
+///
+/// # Panics
+///
+/// Panics if `ClusterAssignments::num_candidates()` does not equal the
+/// number of graph nodes (indicates a pipeline wiring bug).
+#[derive(Debug, Clone)]
+pub struct IntraTopicEdgeRemover {
+    assignments: ClusterAssignments,
+}
+
+impl IntraTopicEdgeRemover {
+    /// Create from pre-computed cluster assignments.
+    pub fn new(assignments: ClusterAssignments) -> Self {
+        Self { assignments }
+    }
+
+    /// Borrow the inner cluster assignments.
+    pub fn assignments(&self) -> &ClusterAssignments {
+        &self.assignments
+    }
+}
+
+impl GraphTransform for IntraTopicEdgeRemover {
+    fn transform(
+        &self,
+        graph: &mut Graph,
+        _tokens: TokenStreamRef<'_>,
+        _candidates: CandidateSetRef<'_>,
+        _cfg: &TextRankConfig,
+    ) {
+        let n = graph.num_nodes();
+        if n == 0 || self.assignments.is_empty() {
+            return;
+        }
+
+        assert_eq!(
+            self.assignments.num_candidates(),
+            n,
+            "IntraTopicEdgeRemover: cluster assignments length ({}) != graph node count ({})",
+            self.assignments.num_candidates(),
+            n,
+        );
+
+        let csr = graph.csr_mut();
+
+        for node in 0..n {
+            let cluster = self.assignments.cluster_of(node);
+            let start = csr.row_ptr[node];
+            let end = csr.row_ptr[node + 1];
+
+            for idx in start..end {
+                let neighbor = csr.col_idx[idx] as usize;
+                if self.assignments.cluster_of(neighbor) == cluster {
+                    csr.weights[idx] = 0.0;
+                }
+            }
+        }
+
+        // Recompute out_degree and total_weight after zeroing.
+        for node in 0..n {
+            let start = csr.row_ptr[node];
+            let end = csr.row_ptr[node + 1];
+
+            let mut degree = 0u32;
+            let mut total = 0.0f64;
+            for idx in start..end {
+                let w = csr.weights[idx];
+                if w > 0.0 {
+                    degree += 1;
+                    total += w;
+                }
+            }
+            csr.out_degree[node] = degree;
+            csr.total_weight[node] = total;
+        }
+    }
+}
+
 // ============================================================================
 // Clusterer — topic clustering of phrase candidates (stage 1a)
 // ============================================================================
@@ -3048,6 +3139,223 @@ mod tests {
     #[test]
     fn test_noop_graph_transform_default() {
         let _t = NoopGraphTransform::default();
+    }
+
+    // ================================================================
+    // IntraTopicEdgeRemover tests
+    // ================================================================
+
+    /// Helper: build a small graph with known edges for testing
+    /// IntraTopicEdgeRemover.
+    ///
+    /// Creates a 4-node graph:
+    ///   0 -- 1 (weight 1.0, bidirectional)
+    ///   0 -- 2 (weight 1.0, bidirectional)
+    ///   1 -- 2 (weight 1.0, bidirectional)
+    ///   2 -- 3 (weight 1.0, bidirectional)
+    fn build_test_graph_4nodes() -> Graph {
+        use crate::graph::builder::GraphBuilder as LegacyGraphBuilder;
+
+        let mut gb = LegacyGraphBuilder::with_capacity(4);
+        gb.get_or_create_node("n0");
+        gb.get_or_create_node("n1");
+        gb.get_or_create_node("n2");
+        gb.get_or_create_node("n3");
+
+        // Bidirectional edges.
+        gb.increment_directed_edge(0, 1, 1.0);
+        gb.increment_directed_edge(1, 0, 1.0);
+        gb.increment_directed_edge(0, 2, 1.0);
+        gb.increment_directed_edge(2, 0, 1.0);
+        gb.increment_directed_edge(1, 2, 1.0);
+        gb.increment_directed_edge(2, 1, 1.0);
+        gb.increment_directed_edge(2, 3, 1.0);
+        gb.increment_directed_edge(3, 2, 1.0);
+
+        Graph::from_builder(&gb)
+    }
+
+    #[test]
+    fn test_intra_topic_edge_remover_zeros_same_cluster_edges() {
+        let mut graph = build_test_graph_4nodes();
+        let cfg = TextRankConfig::default();
+        let tokens = rich_tokens();
+        let stream = TokenStream::from_tokens(&tokens);
+        let cs = word_candidates(&stream, &cfg);
+
+        // Cluster: {0, 1} in cluster 0, {2, 3} in cluster 1.
+        let assignments =
+            ClusterAssignments::from_cluster_vecs(&[vec![0, 1], vec![2, 3]], 4);
+        let remover = IntraTopicEdgeRemover::new(assignments);
+
+        remover.transform(&mut graph, stream.as_ref(), cs.as_ref(), &cfg);
+
+        // Edge 0--1 (same cluster) should be zeroed.
+        let edges_0: Vec<_> = graph.neighbors(0).collect();
+        let edge_0_1 = edges_0.iter().find(|&&(n, _)| n == 1);
+        assert_eq!(
+            edge_0_1.map(|&(_, w)| w),
+            Some(0.0),
+            "Intra-cluster edge 0→1 should be zeroed"
+        );
+
+        // Edge 2--3 (same cluster) should be zeroed.
+        let edges_2: Vec<_> = graph.neighbors(2).collect();
+        let edge_2_3 = edges_2.iter().find(|&&(n, _)| n == 3);
+        assert_eq!(
+            edge_2_3.map(|&(_, w)| w),
+            Some(0.0),
+            "Intra-cluster edge 2→3 should be zeroed"
+        );
+
+        // Edge 0--2 (cross-cluster) should be preserved.
+        let edge_0_2 = edges_0.iter().find(|&&(n, _)| n == 2);
+        assert_eq!(
+            edge_0_2.map(|&(_, w)| w),
+            Some(1.0),
+            "Cross-cluster edge 0→2 should be preserved"
+        );
+
+        // Edge 1--2 (cross-cluster) should be preserved.
+        let edges_1: Vec<_> = graph.neighbors(1).collect();
+        let edge_1_2 = edges_1.iter().find(|&&(n, _)| n == 2);
+        assert_eq!(
+            edge_1_2.map(|&(_, w)| w),
+            Some(1.0),
+            "Cross-cluster edge 1→2 should be preserved"
+        );
+
+        // Graph should be marked as transformed.
+        assert!(graph.is_transformed());
+    }
+
+    #[test]
+    fn test_intra_topic_edge_remover_updates_degree_and_weight() {
+        let mut graph = build_test_graph_4nodes();
+        let cfg = TextRankConfig::default();
+        let tokens = rich_tokens();
+        let stream = TokenStream::from_tokens(&tokens);
+        let cs = word_candidates(&stream, &cfg);
+
+        // Node 0 originally: edges to 1, 2 → degree=2, total_weight=2.0
+        assert_eq!(graph.csr().out_degree[0], 2);
+        assert!((graph.csr().total_weight[0] - 2.0).abs() < 1e-10);
+
+        // Cluster: {0, 1} in cluster 0, {2} in cluster 1, {3} in cluster 2.
+        let assignments =
+            ClusterAssignments::from_cluster_vecs(&[vec![0, 1], vec![2], vec![3]], 4);
+        let remover = IntraTopicEdgeRemover::new(assignments);
+        remover.transform(&mut graph, stream.as_ref(), cs.as_ref(), &cfg);
+
+        // Node 0: edge to 1 zeroed (same cluster), edge to 2 kept.
+        assert_eq!(graph.csr().out_degree[0], 1, "Node 0 should have degree 1 after removal");
+        assert!(
+            (graph.csr().total_weight[0] - 1.0).abs() < 1e-10,
+            "Node 0 total_weight should be 1.0"
+        );
+
+        // Node 3: edge to 2 kept (different cluster).
+        assert_eq!(graph.csr().out_degree[3], 1);
+    }
+
+    #[test]
+    fn test_intra_topic_edge_remover_all_same_cluster() {
+        // All nodes in one cluster → all edges zeroed → all become dangling.
+        let mut graph = build_test_graph_4nodes();
+        let cfg = TextRankConfig::default();
+        let tokens = rich_tokens();
+        let stream = TokenStream::from_tokens(&tokens);
+        let cs = word_candidates(&stream, &cfg);
+
+        let assignments =
+            ClusterAssignments::from_cluster_vecs(&[vec![0, 1, 2, 3]], 4);
+        let remover = IntraTopicEdgeRemover::new(assignments);
+        remover.transform(&mut graph, stream.as_ref(), cs.as_ref(), &cfg);
+
+        // All edges should be zeroed.
+        for node in 0..4u32 {
+            assert_eq!(
+                graph.csr().out_degree[node as usize], 0,
+                "Node {node} should have degree 0 (all same cluster)"
+            );
+            assert!(
+                graph.csr().total_weight[node as usize].abs() < 1e-10,
+                "Node {node} should have zero total_weight"
+            );
+        }
+
+        // All nodes should be dangling.
+        assert_eq!(graph.dangling_nodes().len(), 4);
+    }
+
+    #[test]
+    fn test_intra_topic_edge_remover_all_different_clusters() {
+        // Each node in its own cluster → no edges removed.
+        let mut graph = build_test_graph_4nodes();
+        let cfg = TextRankConfig::default();
+        let tokens = rich_tokens();
+        let stream = TokenStream::from_tokens(&tokens);
+        let cs = word_candidates(&stream, &cfg);
+
+        // Capture original state.
+        let orig_weights: Vec<f64> = graph.csr().weights.clone();
+        let orig_degrees: Vec<u32> = graph.csr().out_degree.clone();
+
+        let assignments = ClusterAssignments::from_cluster_vecs(
+            &[vec![0], vec![1], vec![2], vec![3]],
+            4,
+        );
+        let remover = IntraTopicEdgeRemover::new(assignments);
+        remover.transform(&mut graph, stream.as_ref(), cs.as_ref(), &cfg);
+
+        // No edges should change.
+        assert_eq!(graph.csr().weights, orig_weights);
+        assert_eq!(graph.csr().out_degree, orig_degrees);
+    }
+
+    #[test]
+    fn test_intra_topic_edge_remover_empty_graph() {
+        let empty_builder = crate::graph::builder::GraphBuilder::new();
+        let mut graph = Graph::from_builder(&empty_builder);
+        let cfg = TextRankConfig::default();
+        let tokens = rich_tokens();
+        let stream = TokenStream::from_tokens(&tokens);
+        let cs = word_candidates(&stream, &cfg);
+
+        let assignments = ClusterAssignments::empty();
+        let remover = IntraTopicEdgeRemover::new(assignments);
+
+        // Should not panic on empty graph.
+        remover.transform(&mut graph, stream.as_ref(), cs.as_ref(), &cfg);
+        assert_eq!(graph.num_nodes(), 0);
+    }
+
+    #[test]
+    fn test_intra_topic_edge_remover_trait_object() {
+        let assignments =
+            ClusterAssignments::from_cluster_vecs(&[vec![0, 1], vec![2, 3]], 4);
+        let transform: Box<dyn GraphTransform> = Box::new(IntraTopicEdgeRemover::new(assignments));
+
+        let mut graph = build_test_graph_4nodes();
+        let cfg = TextRankConfig::default();
+        let tokens = rich_tokens();
+        let stream = TokenStream::from_tokens(&tokens);
+        let cs = word_candidates(&stream, &cfg);
+
+        transform.transform(&mut graph, stream.as_ref(), cs.as_ref(), &cfg);
+        // Verify it works through trait object — same-cluster edges zeroed.
+        let edges_0: Vec<_> = graph.neighbors(0).collect();
+        let edge_0_1_weight = edges_0.iter().find(|&&(n, _)| n == 1).map(|&(_, w)| w);
+        assert_eq!(edge_0_1_weight, Some(0.0));
+    }
+
+    #[test]
+    fn test_intra_topic_edge_remover_accessor() {
+        let assignments =
+            ClusterAssignments::from_cluster_vecs(&[vec![0], vec![1]], 2);
+        let remover = IntraTopicEdgeRemover::new(assignments);
+        assert_eq!(remover.assignments().num_clusters(), 2);
+        assert_eq!(remover.assignments().num_candidates(), 2);
     }
 
     // ================================================================

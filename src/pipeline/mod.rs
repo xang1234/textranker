@@ -43,10 +43,10 @@ pub use runner::{
 // Re-export stage traits and default implementations.
 pub use traits::{
     CandidateSelector, ChunkPhraseBuilder, Clusterer, CooccurrenceGraphBuilder, EdgeWeightPolicy,
-    FocusTermsTeleportBuilder, GraphBuilder, GraphTransform, JaccardHacClusterer,
-    NoopClusterer, NoopGraphTransform, NoopPreprocessor, PageRankRanker, PhraseBuilder,
-    PhraseCandidateSelector, PositionTeleportBuilder, Preprocessor, Ranker, ResultFormatter,
-    StandardResultFormatter, TeleportBuilder, TopicWeightsTeleportBuilder,
+    FocusTermsTeleportBuilder, GraphBuilder, GraphTransform, IntraTopicEdgeRemover,
+    JaccardHacClusterer, NoopClusterer, NoopGraphTransform, NoopPreprocessor, PageRankRanker,
+    PhraseBuilder, PhraseCandidateSelector, PositionTeleportBuilder, Preprocessor, Ranker,
+    ResultFormatter, StandardResultFormatter, TeleportBuilder, TopicWeightsTeleportBuilder,
     UniformTeleportBuilder, WindowGraphBuilder, WindowStrategy, WordNodeSelector,
     DEFAULT_WINDOW_SIZE,
 };
