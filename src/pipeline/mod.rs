@@ -21,10 +21,10 @@ pub mod validation;
 
 // Re-export artifact types for convenient access.
 pub use artifacts::{
-    CandidateKind, CandidateSet, CandidateSetRef, DebugPayload, FormattedResult, Graph,
-    GraphStats, PhraseCandidate, PhraseEntry, PhraseSet, PhraseSetRef, PipelineWorkspace,
-    RankDiagnostics, RankOutput, TeleportType, TeleportVector, TokenEntry, TokenStream,
-    TokenStreamRef, WordCandidate,
+    CandidateKind, CandidateSet, CandidateSetRef, ClusterAssignments, DebugPayload,
+    FormattedResult, Graph, GraphStats, PhraseCandidate, PhraseEntry, PhraseSet, PhraseSetRef,
+    PipelineWorkspace, RankDiagnostics, RankOutput, TeleportType, TeleportVector, TokenEntry,
+    TokenStream, TokenStreamRef, WordCandidate,
 };
 
 // Re-export observer types.
@@ -42,11 +42,11 @@ pub use runner::{
 
 // Re-export stage traits and default implementations.
 pub use traits::{
-    CandidateSelector, ChunkPhraseBuilder, CooccurrenceGraphBuilder, EdgeWeightPolicy,
-    FocusTermsTeleportBuilder, GraphBuilder, GraphTransform, NoopGraphTransform,
-    TopicWeightsTeleportBuilder,
-    NoopPreprocessor, PageRankRanker, PhraseBuilder, PhraseCandidateSelector,
-    PositionTeleportBuilder, Preprocessor, Ranker, ResultFormatter, StandardResultFormatter,
-    TeleportBuilder, UniformTeleportBuilder, WindowGraphBuilder, WindowStrategy,
-    WordNodeSelector, DEFAULT_WINDOW_SIZE,
+    CandidateSelector, ChunkPhraseBuilder, Clusterer, CooccurrenceGraphBuilder, EdgeWeightPolicy,
+    FocusTermsTeleportBuilder, GraphBuilder, GraphTransform, JaccardHacClusterer,
+    NoopClusterer, NoopGraphTransform, NoopPreprocessor, PageRankRanker, PhraseBuilder,
+    PhraseCandidateSelector, PositionTeleportBuilder, Preprocessor, Ranker, ResultFormatter,
+    StandardResultFormatter, TeleportBuilder, TopicWeightsTeleportBuilder,
+    UniformTeleportBuilder, WindowGraphBuilder, WindowStrategy, WordNodeSelector,
+    DEFAULT_WINDOW_SIZE,
 };

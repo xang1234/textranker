@@ -45,8 +45,9 @@ pub use pipeline::errors::{PipelineRuntimeError, PipelineSpecError};
 pub use pipeline::spec::{PipelineSpec, RuntimeSpec};
 pub use pipeline::validation::{ValidationEngine, ValidationReport};
 pub use pipeline::{
-    CandidateSelector, ChunkPhraseBuilder, CooccurrenceGraphBuilder, EdgeWeightPolicy,
-    FocusTermsTeleportBuilder, NoopGraphTransform, NoopPreprocessor, PhraseBuilder,
+    CandidateSelector, ChunkPhraseBuilder, ClusterAssignments, Clusterer,
+    CooccurrenceGraphBuilder, EdgeWeightPolicy, FocusTermsTeleportBuilder, JaccardHacClusterer,
+    NoopClusterer, NoopGraphTransform, NoopPreprocessor, PhraseBuilder,
     TopicWeightsTeleportBuilder, TopicalPageRankPipeline,
     PhraseCandidateSelector, PositionTeleportBuilder, Preprocessor, ResultFormatter,
     StandardResultFormatter, TeleportBuilder, TeleportType, TeleportVector, TokenEntry,

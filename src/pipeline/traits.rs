@@ -5,9 +5,9 @@
 //! feature gate for dynamic composition.
 
 use crate::pipeline::artifacts::{
-    CandidateKind, CandidateSet, CandidateSetRef, DebugPayload, FormattedResult, Graph,
-    PhraseCandidate, PhraseSet, RankOutput, TeleportType, TeleportVector, TokenStream,
-    TokenStreamRef, WordCandidate,
+    CandidateKind, CandidateSet, CandidateSetRef, ClusterAssignments, DebugPayload,
+    FormattedResult, Graph, PhraseCandidate, PhraseSet, RankOutput, TeleportType, TeleportVector,
+    TokenStream, TokenStreamRef, WordCandidate,
 };
 use crate::types::{ChunkSpan, PosTag, TextRankConfig};
 use serde::{Deserialize, Serialize};
@@ -595,6 +595,154 @@ impl GraphTransform for NoopGraphTransform {
         _cfg: &TextRankConfig,
     ) {
         // Intentionally empty.
+    }
+}
+
+// ============================================================================
+// Clusterer — topic clustering of phrase candidates (stage 1a)
+// ============================================================================
+
+/// Groups phrase candidates into topic clusters.
+///
+/// This stage runs after candidate selection for the **topic family**
+/// (TopicRank, MultipartiteRank).  It assigns each phrase candidate to a
+/// cluster ID, producing a [`ClusterAssignments`] artifact that downstream
+/// stages consume:
+///
+/// - **[`GraphTransform`]**: Intra-cluster edge removal (k-partite graph)
+///   and alpha-boost weighting both look up `cluster_of(candidate)`.
+/// - **[`PhraseBuilder`]**: Topic-representative selection picks the
+///   first-occurring phrase from each top-scoring cluster.
+///
+/// The provided [`JaccardHacClusterer`] implements HAC (hierarchical
+/// agglomerative clustering) with Jaccard distance and average linkage —
+/// the strategy used by both TopicRank and MultipartiteRank (differing
+/// only in their `similarity_threshold`).
+///
+/// For the word-level TextRank family (BaseTextRank, SingleRank, etc.),
+/// use [`NoopClusterer`] which returns an empty assignment.
+///
+/// # Contract
+///
+/// - **Input**: a borrowed [`CandidateSetRef`] (phrase-level) and config.
+/// - **Output**: a [`ClusterAssignments`] mapping candidate index →
+///   cluster ID.
+/// - **Deterministic**: same input → same output.
+pub trait Clusterer {
+    /// Cluster phrase candidates into topic groups.
+    fn cluster(
+        &self,
+        candidates: CandidateSetRef<'_>,
+        cfg: &TextRankConfig,
+    ) -> ClusterAssignments;
+}
+
+/// No-op clusterer — the default for word-level pipelines.
+///
+/// Returns an empty [`ClusterAssignments`], which is correct for
+/// pipelines that don't use topic clustering (BaseTextRank, PositionRank,
+/// BiasedTextRank, SingleRank, TopicalPageRank).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopClusterer;
+
+impl Clusterer for NoopClusterer {
+    #[inline]
+    fn cluster(
+        &self,
+        _candidates: CandidateSetRef<'_>,
+        _cfg: &TextRankConfig,
+    ) -> ClusterAssignments {
+        ClusterAssignments::empty()
+    }
+}
+
+/// Jaccard-distance HAC clusterer for the TopicRank / MultipartiteRank family.
+///
+/// Uses hierarchical agglomerative clustering with Jaccard distance between
+/// candidate term sets and average linkage.  The `similarity_threshold`
+/// controls the distance cutoff:
+///
+/// - **TopicRank** default: `0.25`
+/// - **MultipartiteRank** default: `0.26`
+///
+/// Internally delegates to [`clustering::cluster_phrases`] on legacy
+/// `PhraseCandidate` structs reconstructed from the pipeline's interned
+/// [`PhraseCandidate`](crate::pipeline::artifacts::PhraseCandidate)
+/// representation.
+///
+/// # Panics
+///
+/// Panics if called with word-level candidates (the pipeline should never
+/// route word-level candidates to a topic clusterer).
+#[derive(Debug, Clone)]
+pub struct JaccardHacClusterer {
+    /// Jaccard similarity threshold for cluster merging.
+    pub similarity_threshold: f64,
+}
+
+impl JaccardHacClusterer {
+    /// Create a new clusterer with the given similarity threshold.
+    pub fn new(similarity_threshold: f64) -> Self {
+        Self {
+            similarity_threshold,
+        }
+    }
+
+    /// TopicRank default (similarity threshold = 0.25).
+    pub fn topic_rank() -> Self {
+        Self::new(0.25)
+    }
+
+    /// MultipartiteRank default (similarity threshold = 0.26).
+    pub fn multipartite_rank() -> Self {
+        Self::new(0.26)
+    }
+}
+
+impl Clusterer for JaccardHacClusterer {
+    fn cluster(
+        &self,
+        candidates: CandidateSetRef<'_>,
+        _cfg: &TextRankConfig,
+    ) -> ClusterAssignments {
+        use crate::clustering;
+        use rustc_hash::FxHashSet;
+
+        let phrases = candidates.phrases();
+        if phrases.is_empty() {
+            return ClusterAssignments::empty();
+        }
+
+        // Bridge: convert pipeline PhraseCandidate (interned IDs) to
+        // legacy clustering::PhraseCandidate (String term sets).
+        // The legacy HAC only needs the term sets for Jaccard distance,
+        // plus chunk spans for positional info.
+        let legacy_candidates: Vec<clustering::PhraseCandidate> = phrases
+            .iter()
+            .map(|pc| {
+                let terms: FxHashSet<String> = pc
+                    .term_ids
+                    .iter()
+                    .map(|&id| id.to_string())
+                    .collect();
+                clustering::PhraseCandidate {
+                    text: String::new(),
+                    lemma: String::new(),
+                    terms,
+                    chunk: crate::types::ChunkSpan {
+                        start_token: pc.start_token as usize,
+                        end_token: pc.end_token as usize,
+                        start_char: pc.start_char as usize,
+                        end_char: pc.end_char as usize,
+                        sentence_idx: pc.sentence_idx as usize,
+                    },
+                }
+            })
+            .collect();
+
+        let cluster_vecs =
+            clustering::cluster_phrases(&legacy_candidates, self.similarity_threshold);
+        ClusterAssignments::from_cluster_vecs(&cluster_vecs, phrases.len())
     }
 }
 
@@ -2512,6 +2660,163 @@ mod tests {
             assert_eq!(g.lemma(1), "alpha|NOUN");
             assert_eq!(g.lemma(2), "mu|NOUN");
         }
+    }
+
+    // ================================================================
+    // Clusterer tests
+    // ================================================================
+
+    #[test]
+    fn test_noop_clusterer_returns_empty() {
+        let tokens = rich_tokens();
+        let stream = TokenStream::from_tokens(&tokens);
+        let cfg = TextRankConfig::default();
+        let cs = word_candidates(&stream, &cfg);
+
+        let ca = NoopClusterer.cluster(cs.as_ref(), &cfg);
+        assert!(ca.is_empty());
+        assert_eq!(ca.num_clusters(), 0);
+        assert_eq!(ca.num_candidates(), 0);
+    }
+
+    #[test]
+    fn test_noop_clusterer_default_and_debug() {
+        let _c = NoopClusterer::default();
+        let _d = format!("{:?}", NoopClusterer);
+    }
+
+    #[test]
+    fn test_jaccard_hac_clusterer_presets() {
+        let tr = JaccardHacClusterer::topic_rank();
+        assert!((tr.similarity_threshold - 0.25).abs() < 1e-10);
+
+        let mr = JaccardHacClusterer::multipartite_rank();
+        assert!((mr.similarity_threshold - 0.26).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_jaccard_hac_clusterer_with_phrase_candidates() {
+        // Build phrase candidates with overlapping term sets.
+        // Candidates 0 and 1 share terms → should cluster together.
+        // Candidate 2 is disjoint → separate cluster.
+        let phrases = vec![
+            PhraseCandidate {
+                start_token: 0,
+                end_token: 2,
+                start_char: 0,
+                end_char: 10,
+                sentence_idx: 0,
+                lemma_ids: vec![0, 1],
+                term_ids: vec![10, 11],
+            },
+            PhraseCandidate {
+                start_token: 3,
+                end_token: 5,
+                start_char: 11,
+                end_char: 20,
+                sentence_idx: 0,
+                lemma_ids: vec![0, 2],
+                term_ids: vec![10, 11], // same terms as candidate 0
+            },
+            PhraseCandidate {
+                start_token: 6,
+                end_token: 8,
+                start_char: 21,
+                end_char: 30,
+                sentence_idx: 1,
+                lemma_ids: vec![3, 4],
+                term_ids: vec![30, 31], // disjoint from others
+            },
+        ];
+
+        let cs = CandidateSet::from_kind(CandidateKind::Phrases(phrases));
+        let cfg = TextRankConfig::default();
+        let clusterer = JaccardHacClusterer::topic_rank();
+
+        let ca = clusterer.cluster(cs.as_ref(), &cfg);
+
+        assert_eq!(ca.num_candidates(), 3);
+        // Candidates 0 and 1 should be in the same cluster.
+        assert_eq!(ca.cluster_of(0), ca.cluster_of(1));
+        // Candidate 2 should be in a different cluster.
+        assert_ne!(ca.cluster_of(0), ca.cluster_of(2));
+        assert_eq!(ca.num_clusters(), 2);
+    }
+
+    #[test]
+    fn test_jaccard_hac_clusterer_empty_candidates() {
+        let cs = CandidateSet::from_kind(CandidateKind::Phrases(Vec::new()));
+        let cfg = TextRankConfig::default();
+        let clusterer = JaccardHacClusterer::new(0.25);
+
+        let ca = clusterer.cluster(cs.as_ref(), &cfg);
+        assert!(ca.is_empty());
+        assert_eq!(ca.num_clusters(), 0);
+    }
+
+    #[test]
+    fn test_jaccard_hac_clusterer_single_candidate() {
+        let phrases = vec![PhraseCandidate {
+            start_token: 0,
+            end_token: 2,
+            start_char: 0,
+            end_char: 10,
+            sentence_idx: 0,
+            lemma_ids: vec![0],
+            term_ids: vec![10],
+        }];
+
+        let cs = CandidateSet::from_kind(CandidateKind::Phrases(phrases));
+        let cfg = TextRankConfig::default();
+        let clusterer = JaccardHacClusterer::new(0.25);
+
+        let ca = clusterer.cluster(cs.as_ref(), &cfg);
+        assert_eq!(ca.num_candidates(), 1);
+        assert_eq!(ca.num_clusters(), 1);
+        assert_eq!(ca.cluster_of(0), 0);
+    }
+
+    #[test]
+    fn test_jaccard_hac_clusterer_all_disjoint() {
+        // Three candidates with completely disjoint term sets.
+        let phrases = vec![
+            PhraseCandidate {
+                start_token: 0, end_token: 1, start_char: 0, end_char: 5,
+                sentence_idx: 0, lemma_ids: vec![0], term_ids: vec![10],
+            },
+            PhraseCandidate {
+                start_token: 2, end_token: 3, start_char: 6, end_char: 10,
+                sentence_idx: 0, lemma_ids: vec![1], term_ids: vec![20],
+            },
+            PhraseCandidate {
+                start_token: 4, end_token: 5, start_char: 11, end_char: 15,
+                sentence_idx: 0, lemma_ids: vec![2], term_ids: vec![30],
+            },
+        ];
+
+        let cs = CandidateSet::from_kind(CandidateKind::Phrases(phrases));
+        let cfg = TextRankConfig::default();
+        let clusterer = JaccardHacClusterer::new(0.25);
+
+        let ca = clusterer.cluster(cs.as_ref(), &cfg);
+        assert_eq!(ca.num_clusters(), 3);
+        // Each in its own cluster.
+        assert_ne!(ca.cluster_of(0), ca.cluster_of(1));
+        assert_ne!(ca.cluster_of(1), ca.cluster_of(2));
+        assert_ne!(ca.cluster_of(0), ca.cluster_of(2));
+    }
+
+    #[test]
+    fn test_clusterer_trait_object() {
+        // Verify Clusterer works as trait object for dynamic dispatch.
+        let clusterer: Box<dyn Clusterer> = Box::new(NoopClusterer);
+        let tokens = rich_tokens();
+        let stream = TokenStream::from_tokens(&tokens);
+        let cfg = TextRankConfig::default();
+        let cs = word_candidates(&stream, &cfg);
+
+        let ca = clusterer.cluster(cs.as_ref(), &cfg);
+        assert!(ca.is_empty());
     }
 
     // ================================================================

@@ -644,6 +644,108 @@ impl<'a> CandidateSetRef<'a> {
 }
 
 // ============================================================================
+// ClusterAssignments — candidate → cluster mapping (topic families)
+// ============================================================================
+
+/// Maps each phrase candidate to a cluster (topic) ID.
+///
+/// Used by the TopicRank and MultipartiteRank families to group similar
+/// phrase candidates into topic clusters.  Downstream stages
+/// ([`GraphTransform`](crate::pipeline::traits::GraphTransform) for
+/// intra-cluster edge removal, alpha-boost weighting, and
+/// [`PhraseBuilder`](crate::pipeline::traits::PhraseBuilder) for
+/// topic-representative selection) consume this artifact.
+///
+/// # Layout
+///
+/// Internally a flat `Vec<u32>` indexed by candidate position in the
+/// parent [`CandidateSet`] (phrase family).  The value at index `i` is
+/// the 0-based cluster ID for candidate `i`.
+///
+/// The number of clusters is tracked separately so consumers can iterate
+/// over cluster IDs (`0..num_clusters`) without scanning the vector.
+///
+/// # Empty clusters
+///
+/// An empty `ClusterAssignments` (no candidates) has `num_clusters == 0`
+/// and an empty assignment vector.  This is the result of the
+/// [`NoopClusterer`](crate::pipeline::traits::NoopClusterer).
+#[derive(Debug, Clone)]
+pub struct ClusterAssignments {
+    /// `assignments[i]` = cluster ID for candidate `i`.
+    assignments: Vec<u32>,
+    /// Total number of distinct clusters.
+    num_clusters: u32,
+}
+
+impl ClusterAssignments {
+    /// Create an empty assignment (zero candidates, zero clusters).
+    pub fn empty() -> Self {
+        Self {
+            assignments: Vec::new(),
+            num_clusters: 0,
+        }
+    }
+
+    /// Build from the legacy `Vec<Vec<usize>>` cluster representation
+    /// where `clusters[c]` contains the candidate indices in cluster `c`.
+    pub fn from_cluster_vecs(clusters: &[Vec<usize>], num_candidates: usize) -> Self {
+        let mut assignments = vec![0u32; num_candidates];
+        for (cluster_id, members) in clusters.iter().enumerate() {
+            for &candidate_idx in members {
+                if candidate_idx < num_candidates {
+                    assignments[candidate_idx] = cluster_id as u32;
+                }
+            }
+        }
+        Self {
+            assignments,
+            num_clusters: clusters.len() as u32,
+        }
+    }
+
+    /// Cluster ID for candidate at `index`.
+    #[inline]
+    pub fn cluster_of(&self, index: usize) -> u32 {
+        self.assignments[index]
+    }
+
+    /// Number of distinct clusters.
+    #[inline]
+    pub fn num_clusters(&self) -> u32 {
+        self.num_clusters
+    }
+
+    /// Number of candidates (length of the assignment vector).
+    #[inline]
+    pub fn num_candidates(&self) -> usize {
+        self.assignments.len()
+    }
+
+    /// Whether there are no candidates assigned.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.assignments.is_empty()
+    }
+
+    /// Raw slice of cluster assignments indexed by candidate position.
+    #[inline]
+    pub fn as_slice(&self) -> &[u32] {
+        &self.assignments
+    }
+
+    /// Collect the candidate indices belonging to a given cluster.
+    pub fn members_of(&self, cluster_id: u32) -> Vec<usize> {
+        self.assignments
+            .iter()
+            .enumerate()
+            .filter(|&(_, &c)| c == cluster_id)
+            .map(|(i, _)| i)
+            .collect()
+    }
+}
+
+// ============================================================================
 // Graph — pipeline artifact wrapping the CSR representation
 // ============================================================================
 
@@ -2508,5 +2610,73 @@ mod tests {
     fn test_workspace_default() {
         let ws = PipelineWorkspace::default();
         assert!(ws.edge_buf.is_empty());
+    }
+
+    // ================================================================
+    // ClusterAssignments tests
+    // ================================================================
+
+    #[test]
+    fn test_cluster_assignments_empty() {
+        let ca = ClusterAssignments::empty();
+        assert!(ca.is_empty());
+        assert_eq!(ca.num_clusters(), 0);
+        assert_eq!(ca.num_candidates(), 0);
+        assert!(ca.as_slice().is_empty());
+    }
+
+    #[test]
+    fn test_cluster_assignments_from_cluster_vecs() {
+        // 5 candidates, 3 clusters:
+        //   cluster 0: [0, 2]
+        //   cluster 1: [1, 4]
+        //   cluster 2: [3]
+        let clusters = vec![vec![0, 2], vec![1, 4], vec![3]];
+        let ca = ClusterAssignments::from_cluster_vecs(&clusters, 5);
+
+        assert_eq!(ca.num_clusters(), 3);
+        assert_eq!(ca.num_candidates(), 5);
+        assert!(!ca.is_empty());
+
+        assert_eq!(ca.cluster_of(0), 0);
+        assert_eq!(ca.cluster_of(1), 1);
+        assert_eq!(ca.cluster_of(2), 0);
+        assert_eq!(ca.cluster_of(3), 2);
+        assert_eq!(ca.cluster_of(4), 1);
+    }
+
+    #[test]
+    fn test_cluster_assignments_members_of() {
+        let clusters = vec![vec![0, 3], vec![1, 2]];
+        let ca = ClusterAssignments::from_cluster_vecs(&clusters, 4);
+
+        let mut m0 = ca.members_of(0);
+        m0.sort();
+        assert_eq!(m0, vec![0, 3]);
+
+        let mut m1 = ca.members_of(1);
+        m1.sort();
+        assert_eq!(m1, vec![1, 2]);
+
+        // Non-existent cluster returns empty.
+        assert!(ca.members_of(99).is_empty());
+    }
+
+    #[test]
+    fn test_cluster_assignments_single_cluster() {
+        let clusters = vec![vec![0, 1, 2]];
+        let ca = ClusterAssignments::from_cluster_vecs(&clusters, 3);
+
+        assert_eq!(ca.num_clusters(), 1);
+        for i in 0..3 {
+            assert_eq!(ca.cluster_of(i), 0);
+        }
+    }
+
+    #[test]
+    fn test_cluster_assignments_as_slice() {
+        let clusters = vec![vec![0], vec![1], vec![2]];
+        let ca = ClusterAssignments::from_cluster_vecs(&clusters, 3);
+        assert_eq!(ca.as_slice(), &[0, 1, 2]);
     }
 }
