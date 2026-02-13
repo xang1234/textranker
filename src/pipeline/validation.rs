@@ -1,7 +1,7 @@
 //! Validation engine for pipeline specifications.
 //!
 //! The engine runs all registered [`ValidationRule`]s against a
-//! [`PipelineSpec`](super::spec::PipelineSpec) and collects every diagnostic
+//! [`PipelineSpecV1`](super::spec::PipelineSpecV1) and collects every diagnostic
 //! into a [`ValidationReport`] — it never short-circuits on the first error,
 //! so users see all problems at once.
 //!
@@ -112,7 +112,7 @@ impl ValidationReport {
 
 // ─── Rule trait ─────────────────────────────────────────────────────────────
 
-/// A single validation rule that inspects a [`PipelineSpec`] and returns
+/// A single validation rule that inspects a [`PipelineSpecV1`] and returns
 /// zero or more diagnostics.
 ///
 /// Rules are stateless and must be `Send + Sync` so they can be shared
@@ -122,12 +122,12 @@ pub trait ValidationRule: Send + Sync {
     fn name(&self) -> &str;
 
     /// Inspect `spec` and return any findings.
-    fn validate(&self, spec: &PipelineSpec) -> Vec<ValidationDiagnostic>;
+    fn validate(&self, spec: &PipelineSpecV1) -> Vec<ValidationDiagnostic>;
 }
 
 // ─── Engine ─────────────────────────────────────────────────────────────────
 
-/// Runs a set of [`ValidationRule`]s against a [`PipelineSpec`] and collects
+/// Runs a set of [`ValidationRule`]s against a [`PipelineSpecV1`] and collects
 /// all diagnostics into a [`ValidationReport`].
 pub struct ValidationEngine {
     rules: Vec<Box<dyn ValidationRule>>,
@@ -156,7 +156,7 @@ impl ValidationEngine {
     }
 
     /// Run all rules against `spec` and return the collected report.
-    pub fn validate(&self, spec: &PipelineSpec) -> ValidationReport {
+    pub fn validate(&self, spec: &PipelineSpecV1) -> ValidationReport {
         let mut report = ValidationReport::default();
         for rule in &self.rules {
             report.diagnostics.extend(rule.validate(spec));
@@ -184,9 +184,9 @@ impl ValidationRule for RankTeleportRule {
         "rank_teleport"
     }
 
-    fn validate(&self, spec: &PipelineSpec) -> Vec<ValidationDiagnostic> {
+    fn validate(&self, spec: &PipelineSpecV1) -> Vec<ValidationDiagnostic> {
         let is_personalized =
-            spec.modules.rank == Some(RankModuleType::PersonalizedPagerank);
+            matches!(spec.modules.rank, Some(RankSpec::PersonalizedPagerank { .. }));
 
         if is_personalized && spec.modules.teleport.is_none() {
             vec![ValidationDiagnostic::error(
@@ -215,14 +215,9 @@ impl ValidationRule for TopicGraphDepsRule {
         "topic_graph_deps"
     }
 
-    fn validate(&self, spec: &PipelineSpec) -> Vec<ValidationDiagnostic> {
-        let graph = match spec.modules.graph {
-            Some(g)
-                if g == GraphModuleType::TopicGraph
-                    || g == GraphModuleType::CandidateGraph =>
-            {
-                g
-            }
+    fn validate(&self, spec: &PipelineSpecV1) -> Vec<ValidationDiagnostic> {
+        let graph = match &spec.modules.graph {
+            Some(g) if matches!(g, GraphSpec::TopicGraph | GraphSpec::CandidateGraph) => g,
             _ => return vec![],
         };
 
@@ -233,20 +228,20 @@ impl ValidationRule for TopicGraphDepsRule {
                 PipelineSpecError::new(
                     ErrorCode::MissingStage,
                     "/modules/clustering",
-                    format!("{} requires a clustering module", graph.as_str()),
+                    format!("{} requires a clustering module", graph.type_name()),
                 )
                 .with_hint("Add clustering: \"hac\""),
             ));
         }
 
-        if spec.modules.candidates != Some(CandidateModuleType::PhraseCandidates) {
+        if !matches!(spec.modules.candidates, Some(CandidatesSpec::PhraseCandidates)) {
             out.push(ValidationDiagnostic::error(
                 PipelineSpecError::new(
                     ErrorCode::InvalidCombo,
                     "/modules/candidates",
                     format!(
                         "{} requires phrase_candidates, not word_nodes",
-                        graph.as_str()
+                        graph.type_name()
                     ),
                 )
                 .with_hint("Set candidates to \"phrase_candidates\""),
@@ -266,12 +261,12 @@ impl ValidationRule for GraphTransformDepsRule {
         "graph_transform_deps"
     }
 
-    fn validate(&self, spec: &PipelineSpec) -> Vec<ValidationDiagnostic> {
+    fn validate(&self, spec: &PipelineSpecV1) -> Vec<ValidationDiagnostic> {
         let needs_clusters = spec
             .modules
             .graph_transforms
             .iter()
-            .any(|t| *t == GraphTransformType::RemoveIntraClusterEdges);
+            .any(|t| matches!(t, GraphTransformSpec::RemoveIntraClusterEdges));
 
         if needs_clusters && spec.modules.clustering.is_none() {
             vec![ValidationDiagnostic::error(
@@ -297,7 +292,7 @@ impl ValidationRule for RuntimeLimitsRule {
         "runtime_limits"
     }
 
-    fn validate(&self, spec: &PipelineSpec) -> Vec<ValidationDiagnostic> {
+    fn validate(&self, spec: &PipelineSpecV1) -> Vec<ValidationDiagnostic> {
         let mut out = Vec::new();
 
         let checks: &[(&str, Option<usize>)] = &[
@@ -362,7 +357,7 @@ impl ValidationRule for UnknownFieldsRule {
         "unknown_fields"
     }
 
-    fn validate(&self, spec: &PipelineSpec) -> Vec<ValidationDiagnostic> {
+    fn validate(&self, spec: &PipelineSpecV1) -> Vec<ValidationDiagnostic> {
         let mut out = Vec::new();
         out.extend(Self::check_unknowns("", &spec.unknown_fields, spec.strict));
         out.extend(Self::check_unknowns(
@@ -387,8 +382,8 @@ impl ValidationRule for UnknownFieldsRule {
 mod tests {
     use super::*;
 
-    /// Helper: build a PipelineSpec from JSON.
-    fn spec(json: &str) -> PipelineSpec {
+    /// Helper: build a PipelineSpecV1 from JSON.
+    fn spec(json: &str) -> PipelineSpecV1 {
         serde_json::from_str(json).unwrap()
     }
 
@@ -408,7 +403,7 @@ mod tests {
     #[test]
     fn test_standard_pagerank_without_teleport_is_valid() {
         let report = engine().validate(&spec(
-            r#"{ "v": 1, "modules": { "rank": "standard_pagerank" } }"#,
+            r#"{ "v": 1, "modules": { "rank": { "type": "standard_pagerank" } } }"#,
         ));
         assert!(report.is_valid());
     }
@@ -419,8 +414,8 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "rank": "personalized_pagerank",
-                    "teleport": "position"
+                    "rank": { "type": "personalized_pagerank" },
+                    "teleport": { "type": "position" }
                 }
             }"#,
         ));
@@ -433,10 +428,10 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "candidates": "phrase_candidates",
-                    "graph": "topic_graph",
-                    "clustering": "hac",
-                    "rank": "standard_pagerank"
+                    "candidates": { "type": "phrase_candidates" },
+                    "graph": { "type": "topic_graph" },
+                    "clustering": { "type": "hac" },
+                    "rank": { "type": "standard_pagerank" }
                 }
             }"#,
         ));
@@ -449,11 +444,11 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "candidates": "phrase_candidates",
-                    "graph": "candidate_graph",
-                    "clustering": "hac",
-                    "graph_transforms": ["remove_intra_cluster_edges"],
-                    "rank": "standard_pagerank"
+                    "candidates": { "type": "phrase_candidates" },
+                    "graph": { "type": "candidate_graph" },
+                    "clustering": { "type": "hac" },
+                    "graph_transforms": [{ "type": "remove_intra_cluster_edges" }],
+                    "rank": { "type": "standard_pagerank" }
                 }
             }"#,
         ));
@@ -476,7 +471,7 @@ mod tests {
     #[test]
     fn test_personalized_without_teleport_fails() {
         let report = engine().validate(&spec(
-            r#"{ "v": 1, "modules": { "rank": "personalized_pagerank" } }"#,
+            r#"{ "v": 1, "modules": { "rank": { "type": "personalized_pagerank" } } }"#,
         ));
         assert!(report.has_errors());
         let errs: Vec<_> = report.errors().collect();
@@ -491,8 +486,8 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "rank": "personalized_pagerank",
-                    "teleport": "uniform"
+                    "rank": { "type": "personalized_pagerank" },
+                    "teleport": { "type": "uniform" }
                 }
             }"#,
         ));
@@ -507,8 +502,8 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "candidates": "phrase_candidates",
-                    "graph": "topic_graph"
+                    "candidates": { "type": "phrase_candidates" },
+                    "graph": { "type": "topic_graph" }
                 }
             }"#,
         ));
@@ -525,9 +520,9 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "candidates": "word_nodes",
-                    "graph": "topic_graph",
-                    "clustering": "hac"
+                    "candidates": { "type": "word_nodes" },
+                    "graph": { "type": "topic_graph" },
+                    "clustering": { "type": "hac" }
                 }
             }"#,
         ));
@@ -540,7 +535,7 @@ mod tests {
     #[test]
     fn test_topic_graph_missing_both_deps_reports_two_errors() {
         let report = engine().validate(&spec(
-            r#"{ "v": 1, "modules": { "graph": "topic_graph" } }"#,
+            r#"{ "v": 1, "modules": { "graph": { "type": "topic_graph" } } }"#,
         ));
         let errs: Vec<_> = report.errors().collect();
         assert_eq!(errs.len(), 2);
@@ -549,7 +544,7 @@ mod tests {
     #[test]
     fn test_candidate_graph_has_same_deps() {
         let report = engine().validate(&spec(
-            r#"{ "v": 1, "modules": { "graph": "candidate_graph" } }"#,
+            r#"{ "v": 1, "modules": { "graph": { "type": "candidate_graph" } } }"#,
         ));
         let errs: Vec<_> = report.errors().collect();
         assert_eq!(errs.len(), 2);
@@ -561,8 +556,8 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "graph": "cooccurrence_window",
-                    "candidates": "word_nodes"
+                    "graph": { "type": "cooccurrence_window" },
+                    "candidates": { "type": "word_nodes" }
                 }
             }"#,
         ));
@@ -577,7 +572,7 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "graph_transforms": ["remove_intra_cluster_edges"]
+                    "graph_transforms": [{ "type": "remove_intra_cluster_edges" }]
                 }
             }"#,
         ));
@@ -592,7 +587,7 @@ mod tests {
         let report = engine().validate(&spec(
             r#"{
                 "v": 1,
-                "modules": { "graph_transforms": ["alpha_boost"] }
+                "modules": { "graph_transforms": [{ "type": "alpha_boost" }] }
             }"#,
         ));
         // alpha_boost doesn't require clustering (it's a weight modifier)
@@ -709,7 +704,7 @@ mod tests {
     #[test]
     fn test_no_unknown_fields_clean() {
         let report = engine().validate(&spec(
-            r#"{ "v": 1, "strict": true, "modules": { "rank": "standard_pagerank" } }"#,
+            r#"{ "v": 1, "strict": true, "modules": { "rank": { "type": "standard_pagerank" } } }"#,
         ));
         assert!(report.is_empty());
     }
@@ -723,7 +718,7 @@ mod tests {
         assert!(report.is_empty());
 
         let report = engine().validate(&spec(
-            r#"{ "v": 1, "modules": { "rank": "personalized_pagerank" } }"#,
+            r#"{ "v": 1, "modules": { "rank": { "type": "personalized_pagerank" } } }"#,
         ));
         assert_eq!(report.len(), 1);
         assert!(!report.is_empty());
@@ -737,7 +732,7 @@ mod tests {
                 "v": 1,
                 "strict": true,
                 "bogus": true,
-                "modules": { "rank": "personalized_pagerank" },
+                "modules": { "rank": { "type": "personalized_pagerank" } },
                 "runtime": { "max_tokens": 0 }
             }"#,
         ));
@@ -754,7 +749,7 @@ mod tests {
             fn name(&self) -> &str {
                 "always_warn"
             }
-            fn validate(&self, _spec: &PipelineSpec) -> Vec<ValidationDiagnostic> {
+            fn validate(&self, _spec: &PipelineSpecV1) -> Vec<ValidationDiagnostic> {
                 vec![ValidationDiagnostic::warning(PipelineSpecError::new(
                     ErrorCode::ValidationFailed,
                     "",
@@ -775,7 +770,7 @@ mod tests {
     #[test]
     fn test_report_serializes_to_json() {
         let report = engine().validate(&spec(
-            r#"{ "v": 1, "modules": { "rank": "personalized_pagerank" } }"#,
+            r#"{ "v": 1, "modules": { "rank": { "type": "personalized_pagerank" } } }"#,
         ));
         let json = serde_json::to_value(&report).unwrap();
         let diags = json["diagnostics"].as_array().unwrap();
@@ -793,7 +788,7 @@ mod tests {
     #[test]
     fn test_rank_teleport_path_and_hint() {
         let report = engine().validate(&spec(
-            r#"{ "v": 1, "modules": { "rank": "personalized_pagerank" } }"#,
+            r#"{ "v": 1, "modules": { "rank": { "type": "personalized_pagerank" } } }"#,
         ));
         let err = report.errors().next().unwrap();
         assert_eq!(err.path, "/modules/teleport");
@@ -810,8 +805,8 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "candidates": "phrase_candidates",
-                    "graph": "topic_graph"
+                    "candidates": { "type": "phrase_candidates" },
+                    "graph": { "type": "topic_graph" }
                 }
             }"#,
         ));
@@ -828,9 +823,9 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "candidates": "word_nodes",
-                    "graph": "topic_graph",
-                    "clustering": "hac"
+                    "candidates": { "type": "word_nodes" },
+                    "graph": { "type": "topic_graph" },
+                    "clustering": { "type": "hac" }
                 }
             }"#,
         ));
@@ -849,7 +844,7 @@ mod tests {
         let report = engine().validate(&spec(
             r#"{
                 "v": 1,
-                "modules": { "graph_transforms": ["remove_intra_cluster_edges"] }
+                "modules": { "graph_transforms": [{ "type": "remove_intra_cluster_edges" }] }
             }"#,
         ));
         let err = report.errors().next().unwrap();
@@ -917,9 +912,9 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "candidates": "word_nodes",
-                    "graph": "cooccurrence_window",
-                    "rank": "standard_pagerank"
+                    "candidates": { "type": "word_nodes" },
+                    "graph": { "type": "cooccurrence_window" },
+                    "rank": { "type": "standard_pagerank" }
                 }
             }"#,
         ));
@@ -934,10 +929,10 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "candidates": "word_nodes",
-                    "graph": "cooccurrence_window",
-                    "teleport": "position",
-                    "rank": "personalized_pagerank"
+                    "candidates": { "type": "word_nodes" },
+                    "graph": { "type": "cooccurrence_window" },
+                    "teleport": { "type": "position" },
+                    "rank": { "type": "personalized_pagerank" }
                 }
             }"#,
         ));
@@ -951,10 +946,10 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "candidates": "word_nodes",
-                    "graph": "cooccurrence_window",
-                    "teleport": "focus_terms",
-                    "rank": "personalized_pagerank"
+                    "candidates": { "type": "word_nodes" },
+                    "graph": { "type": "cooccurrence_window" },
+                    "teleport": { "type": "focus_terms" },
+                    "rank": { "type": "personalized_pagerank" }
                 }
             }"#,
         ));
@@ -968,10 +963,10 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "candidates": "word_nodes",
-                    "graph": "cooccurrence_window",
-                    "teleport": "topic_weights",
-                    "rank": "personalized_pagerank"
+                    "candidates": { "type": "word_nodes" },
+                    "graph": { "type": "cooccurrence_window" },
+                    "teleport": { "type": "topic_weights" },
+                    "rank": { "type": "personalized_pagerank" }
                 }
             }"#,
         ));
@@ -985,10 +980,10 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "candidates": "phrase_candidates",
-                    "clustering": "hac",
-                    "graph": "topic_graph",
-                    "rank": "standard_pagerank"
+                    "candidates": { "type": "phrase_candidates" },
+                    "clustering": { "type": "hac" },
+                    "graph": { "type": "topic_graph" },
+                    "rank": { "type": "standard_pagerank" }
                 }
             }"#,
         ));
@@ -1003,11 +998,11 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "candidates": "phrase_candidates",
-                    "clustering": "hac",
-                    "graph": "candidate_graph",
-                    "graph_transforms": ["remove_intra_cluster_edges", "alpha_boost"],
-                    "rank": "standard_pagerank"
+                    "candidates": { "type": "phrase_candidates" },
+                    "clustering": { "type": "hac" },
+                    "graph": { "type": "candidate_graph" },
+                    "graph_transforms": [{ "type": "remove_intra_cluster_edges" }, { "type": "alpha_boost" }],
+                    "rank": { "type": "standard_pagerank" }
                 }
             }"#,
         ));
@@ -1022,10 +1017,10 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "candidates": "word_nodes",
-                    "graph": "cooccurrence_window",
-                    "teleport": "position",
-                    "rank": "personalized_pagerank"
+                    "candidates": { "type": "word_nodes" },
+                    "graph": { "type": "cooccurrence_window" },
+                    "teleport": { "type": "position" },
+                    "rank": { "type": "personalized_pagerank" }
                 },
                 "runtime": { "max_tokens": 200000 }
             }"#,
@@ -1042,8 +1037,8 @@ mod tests {
                 r#"{{
                     "v": 1,
                     "modules": {{
-                        "rank": "personalized_pagerank",
-                        "teleport": "{teleport}"
+                        "rank": {{ "type": "personalized_pagerank" }},
+                        "teleport": {{ "type": "{teleport}" }}
                     }}
                 }}"#
             );
@@ -1062,23 +1057,23 @@ mod tests {
         // Demonstrates how a module-availability rule works:
         // check that requested modules are in a set of available ones.
         struct ModuleAvailabilityRule {
-            available_ranks: Vec<RankModuleType>,
+            available_rank_types: Vec<String>,
         }
 
         impl ValidationRule for ModuleAvailabilityRule {
             fn name(&self) -> &str {
                 "module_availability"
             }
-            fn validate(&self, spec: &PipelineSpec) -> Vec<ValidationDiagnostic> {
+            fn validate(&self, spec: &PipelineSpecV1) -> Vec<ValidationDiagnostic> {
                 if let Some(rank) = &spec.modules.rank {
-                    if !self.available_ranks.contains(rank) {
+                    if !self.available_rank_types.iter().any(|t| t == rank.type_name()) {
                         return vec![ValidationDiagnostic::error(
                             PipelineSpecError::new(
                                 ErrorCode::ModuleUnavailable,
                                 "/modules/rank",
                                 format!(
-                                    "rank module {:?} is not available in this build",
-                                    rank
+                                    "rank module {} is not available in this build",
+                                    rank.type_name()
                                 ),
                             )
                             .with_hint(
@@ -1094,12 +1089,12 @@ mod tests {
         // Engine where only standard_pagerank is "available"
         let mut eng = ValidationEngine::new();
         eng.add_rule(Box::new(ModuleAvailabilityRule {
-            available_ranks: vec![RankModuleType::StandardPagerank],
+            available_rank_types: vec!["standard_pagerank".to_string()],
         }));
 
         // Requesting personalized → unavailable
         let report = eng.validate(&spec(
-            r#"{ "v": 1, "modules": { "rank": "personalized_pagerank" } }"#,
+            r#"{ "v": 1, "modules": { "rank": { "type": "personalized_pagerank" } } }"#,
         ));
         assert!(report.has_errors());
         let err = report.errors().next().unwrap();
@@ -1109,7 +1104,7 @@ mod tests {
 
         // Requesting standard → available
         let report = eng.validate(&spec(
-            r#"{ "v": 1, "modules": { "rank": "standard_pagerank" } }"#,
+            r#"{ "v": 1, "modules": { "rank": { "type": "standard_pagerank" } } }"#,
         ));
         assert!(report.is_valid());
     }
@@ -1130,9 +1125,9 @@ mod tests {
                 "strict": true,
                 "bogus": true,
                 "modules": {
-                    "rank": "personalized_pagerank",
-                    "graph": "topic_graph",
-                    "graph_transforms": ["remove_intra_cluster_edges"]
+                    "rank": { "type": "personalized_pagerank" },
+                    "graph": { "type": "topic_graph" },
+                    "graph_transforms": [{ "type": "remove_intra_cluster_edges" }]
                 },
                 "runtime": { "max_tokens": 0 }
             }"#,
@@ -1161,7 +1156,7 @@ mod tests {
     #[test]
     fn test_missing_stage_code_used() {
         let report = engine().validate(&spec(
-            r#"{ "v": 1, "modules": { "rank": "personalized_pagerank" } }"#,
+            r#"{ "v": 1, "modules": { "rank": { "type": "personalized_pagerank" } } }"#,
         ));
         assert!(report.errors().any(|e| e.code == ErrorCode::MissingStage));
     }
@@ -1172,9 +1167,9 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "candidates": "word_nodes",
-                    "graph": "topic_graph",
-                    "clustering": "hac"
+                    "candidates": { "type": "word_nodes" },
+                    "graph": { "type": "topic_graph" },
+                    "clustering": { "type": "hac" }
                 }
             }"#,
         ));
@@ -1265,10 +1260,10 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "candidates": "phrase_candidates",
-                    "clustering": "hac",
-                    "graph": "candidate_graph",
-                    "graph_transforms": ["remove_intra_cluster_edges", "alpha_boost"]
+                    "candidates": { "type": "phrase_candidates" },
+                    "clustering": { "type": "hac" },
+                    "graph": { "type": "candidate_graph" },
+                    "graph_transforms": [{ "type": "remove_intra_cluster_edges" }, { "type": "alpha_boost" }]
                 }
             }"#,
         ));
@@ -1281,8 +1276,8 @@ mod tests {
             r#"{
                 "v": 1,
                 "modules": {
-                    "candidates": "phrase_candidates",
-                    "graph": "candidate_graph"
+                    "candidates": { "type": "phrase_candidates" },
+                    "graph": { "type": "candidate_graph" }
                 }
             }"#,
         ));
@@ -1297,7 +1292,7 @@ mod tests {
     #[test]
     fn test_topic_graph_message_names_graph_type() {
         let report = engine().validate(&spec(
-            r#"{ "v": 1, "modules": { "graph": "topic_graph" } }"#,
+            r#"{ "v": 1, "modules": { "graph": { "type": "topic_graph" } } }"#,
         ));
         // First error should mention topic_graph
         let errs: Vec<_> = report.errors().collect();

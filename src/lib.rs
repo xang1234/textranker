@@ -42,7 +42,12 @@ pub use pagerank::{
 pub use phrase::extraction::PhraseExtractor;
 pub use pipeline::error_code::ErrorCode;
 pub use pipeline::errors::{PipelineRuntimeError, PipelineSpecError};
-pub use pipeline::spec::{ExposeSpec, NodeScoresSpec, PageRankExposeSpec, PipelineSpec, RuntimeSpec};
+pub use pipeline::spec::{
+    CandidatesSpec, ClusteringSpec, EdgeWeightingSpec, ExposeSpec, FormatSpec,
+    GraphSpec, GraphTransformSpec, ModuleSet, NodeScoresSpec, PageRankExposeSpec,
+    PhraseGroupingSpec, PhraseSpec, PipelineSpec, PipelineSpecV1, PreprocessSpec,
+    RankSpec, RuntimeSpec, ScoreAggregationSpec, TeleportSpec,
+};
 pub use pipeline::validation::{ValidationEngine, ValidationReport};
 pub use pipeline::{
     AlphaBoostWeighter, CandidateGraphBuilder, CandidateSelector, ChunkPhraseBuilder,

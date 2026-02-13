@@ -4,7 +4,7 @@
 //! minimizes Python↔Rust overhead by passing pre-tokenized data.
 
 use crate::phrase::extraction::extract_keyphrases_with_info;
-use crate::pipeline::spec::PipelineSpec;
+use crate::pipeline::spec::{PipelineSpec, PipelineSpecV1};
 use crate::pipeline::validation::{ValidationEngine, ValidationReport};
 use crate::types::{DeterminismMode, PhraseGrouping, PosTag, ScoreAggregation, TextRankConfig, Token};
 use crate::variants::biased_textrank::BiasedTextRank;
@@ -326,7 +326,7 @@ pub struct ValidationResponse {
 ///
 /// Used by both `extract_from_json` (when `validate_only` is true)
 /// and `validate_pipeline_spec`.
-pub fn validate_spec_impl(spec: &PipelineSpec) -> ValidationResponse {
+pub fn validate_spec_impl(spec: &PipelineSpecV1) -> ValidationResponse {
     let engine = ValidationEngine::with_defaults();
     let report = engine.validate(spec);
     ValidationResponse {
@@ -358,10 +358,18 @@ pub fn extract_from_json(py: Python<'_>, json_input: &str) -> PyResult<String> {
                 "validate_only requires a 'pipeline' field",
             )
         })?;
-        let spec: PipelineSpec = serde_json::from_value(pipeline_value).map_err(|e| {
+        let pipeline_spec: PipelineSpec = serde_json::from_value(pipeline_value).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("Invalid pipeline spec: {}", e))
         })?;
-        let response = validate_spec_impl(&spec);
+        let response = match &pipeline_spec {
+            PipelineSpec::V1(v1) => validate_spec_impl(v1),
+            PipelineSpec::Preset(name) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Preset pipeline '{}' resolution is not yet implemented",
+                    name
+                )));
+            }
+        };
         return serde_json::to_string(&response)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
     }
@@ -426,10 +434,18 @@ pub fn extract_from_json(py: Python<'_>, json_input: &str) -> PyResult<String> {
 #[pyfunction]
 #[pyo3(signature = (json_spec))]
 pub fn validate_pipeline_spec(json_spec: &str) -> PyResult<String> {
-    let spec: PipelineSpec = serde_json::from_str(json_spec).map_err(|e| {
+    let pipeline_spec: PipelineSpec = serde_json::from_str(json_spec).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid pipeline spec: {}", e))
     })?;
-    let response = validate_spec_impl(&spec);
+    let response = match &pipeline_spec {
+        PipelineSpec::V1(v1) => validate_spec_impl(v1),
+        PipelineSpec::Preset(name) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Preset pipeline '{}' resolution is not yet implemented",
+                name
+            )));
+        }
+    };
     serde_json::to_string(&response)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
@@ -503,17 +519,17 @@ pub fn extract_batch_from_json(py: Python<'_>, json_input: &str) -> PyResult<Str
 mod tests {
     use super::*;
     use crate::graph::builder::GraphBuilder;
-    use crate::pipeline::spec::PipelineSpec;
+    use crate::pipeline::spec::{PipelineSpec, PipelineSpecV1};
 
     // ─── Validate-only mode ─────────────────────────────────────────
 
     #[test]
     fn test_validate_spec_impl_valid() {
-        let spec: PipelineSpec = serde_json::from_str(r#"{
+        let spec: PipelineSpecV1 = serde_json::from_str(r#"{
             "v": 1,
             "modules": {
-                "rank": "personalized_pagerank",
-                "teleport": "position"
+                "rank": { "type": "personalized_pagerank" },
+                "teleport": { "type": "position" }
             }
         }"#)
         .unwrap();
@@ -524,9 +540,9 @@ mod tests {
 
     #[test]
     fn test_validate_spec_impl_invalid() {
-        let spec: PipelineSpec = serde_json::from_str(r#"{
+        let spec: PipelineSpecV1 = serde_json::from_str(r#"{
             "v": 1,
-            "modules": { "rank": "personalized_pagerank" }
+            "modules": { "rank": { "type": "personalized_pagerank" } }
         }"#)
         .unwrap();
         let resp = validate_spec_impl(&spec);
@@ -536,9 +552,9 @@ mod tests {
 
     #[test]
     fn test_validate_spec_impl_response_json_shape() {
-        let spec: PipelineSpec = serde_json::from_str(r#"{
+        let spec: PipelineSpecV1 = serde_json::from_str(r#"{
             "v": 1,
-            "modules": { "rank": "personalized_pagerank" }
+            "modules": { "rank": { "type": "personalized_pagerank" } }
         }"#)
         .unwrap();
         let resp = validate_spec_impl(&spec);
@@ -559,7 +575,7 @@ mod tests {
         // validate_only documents should not require tokens
         let doc: JsonDocument = serde_json::from_str(r#"{
             "validate_only": true,
-            "pipeline": { "v": 1, "modules": { "rank": "standard_pagerank" } }
+            "pipeline": { "v": 1, "modules": { "rank": { "type": "standard_pagerank" } } }
         }"#)
         .unwrap();
         assert!(doc.validate_only);
@@ -569,7 +585,7 @@ mod tests {
 
     #[test]
     fn test_validate_only_with_warnings() {
-        let spec: PipelineSpec = serde_json::from_str(r#"{
+        let spec: PipelineSpecV1 = serde_json::from_str(r#"{
             "v": 1,
             "strict": false,
             "bogus_field": 42
@@ -603,14 +619,14 @@ mod tests {
 
     #[test]
     fn test_validate_spec_impl_multipartite_valid() {
-        let spec: PipelineSpec = serde_json::from_str(r#"{
+        let spec: PipelineSpecV1 = serde_json::from_str(r#"{
             "v": 1,
             "modules": {
-                "candidates": "phrase_candidates",
-                "clustering": "hac",
-                "graph": "candidate_graph",
-                "graph_transforms": ["remove_intra_cluster_edges", "alpha_boost"],
-                "rank": "standard_pagerank"
+                "candidates": { "type": "phrase_candidates" },
+                "clustering": { "type": "hac" },
+                "graph": { "type": "candidate_graph" },
+                "graph_transforms": [{ "type": "remove_intra_cluster_edges" }, { "type": "alpha_boost" }],
+                "rank": { "type": "standard_pagerank" }
             }
         }"#).unwrap();
         let resp = validate_spec_impl(&spec);
@@ -621,11 +637,11 @@ mod tests {
     #[test]
     fn test_validate_spec_impl_multiple_errors_all_returned() {
         // personalized without teleport + topic_graph missing clustering
-        let spec: PipelineSpec = serde_json::from_str(r#"{
+        let spec: PipelineSpecV1 = serde_json::from_str(r#"{
             "v": 1,
             "modules": {
-                "rank": "personalized_pagerank",
-                "graph": "topic_graph"
+                "rank": { "type": "personalized_pagerank" },
+                "graph": { "type": "topic_graph" }
             }
         }"#).unwrap();
         let resp = validate_spec_impl(&spec);
@@ -644,7 +660,7 @@ mod tests {
 
     #[test]
     fn test_validate_spec_impl_strict_unknown_in_response() {
-        let spec: PipelineSpec = serde_json::from_str(r#"{
+        let spec: PipelineSpecV1 = serde_json::from_str(r#"{
             "v": 1,
             "strict": true,
             "bogus_field": 42
@@ -659,16 +675,15 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_only_document_with_invalid_pipeline_spec() {
-        // Malformed pipeline value — not a valid PipelineSpec
+    fn test_validate_only_document_with_preset_pipeline_spec() {
+        // A string pipeline value now parses as PipelineSpec::Preset
         let doc: JsonDocument = serde_json::from_str(r#"{
             "validate_only": true,
-            "pipeline": "not_an_object"
+            "pipeline": "textrank"
         }"#).unwrap();
         assert!(doc.validate_only);
-        // The pipeline field is a string, which won't parse as PipelineSpec
-        let result = serde_json::from_value::<PipelineSpec>(doc.pipeline.unwrap());
-        assert!(result.is_err());
+        let spec = serde_json::from_value::<PipelineSpec>(doc.pipeline.unwrap()).unwrap();
+        assert!(spec.is_preset());
     }
 
     #[test]
@@ -684,11 +699,11 @@ mod tests {
     #[test]
     fn test_validate_response_json_has_valid_and_diagnostics() {
         // Verify the exact JSON shape of a successful validation
-        let spec: PipelineSpec = serde_json::from_str(r#"{
+        let spec: PipelineSpecV1 = serde_json::from_str(r#"{
             "v": 1,
             "modules": {
-                "rank": "personalized_pagerank",
-                "teleport": "focus_terms"
+                "rank": { "type": "personalized_pagerank" },
+                "teleport": { "type": "focus_terms" }
             }
         }"#).unwrap();
         let resp = validate_spec_impl(&spec);
@@ -703,9 +718,9 @@ mod tests {
 
     #[test]
     fn test_validate_response_diagnostic_has_all_fields() {
-        let spec: PipelineSpec = serde_json::from_str(r#"{
+        let spec: PipelineSpecV1 = serde_json::from_str(r#"{
             "v": 1,
-            "modules": { "rank": "personalized_pagerank" }
+            "modules": { "rank": { "type": "personalized_pagerank" } }
         }"#).unwrap();
         let resp = validate_spec_impl(&spec);
         let json = serde_json::to_value(&resp).unwrap();
