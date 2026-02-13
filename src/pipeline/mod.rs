@@ -16,6 +16,7 @@ pub mod errors;
 pub mod observer;
 pub mod runner;
 pub mod spec;
+pub mod spec_builder;
 pub mod traits;
 pub mod validation;
 
@@ -40,6 +41,12 @@ pub use runner::{
     PipelineBuilder, PositionRankPipeline, SingleRankPipeline, TopicRankPipeline,
     TopicalPageRankPipeline,
 };
+
+// Re-export preset resolution, spec resolution, and module merging.
+pub use spec::{merge_modules, resolve_preset, resolve_spec};
+
+// Re-export spec builder types.
+pub use spec_builder::{DynPipeline, SpecPipelineBuilder};
 
 // Re-export stage traits and default implementations.
 pub use traits::{

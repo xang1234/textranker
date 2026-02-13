@@ -31,6 +31,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::artifacts::DebugLevel;
+use super::error_code::ErrorCode;
+use super::errors::PipelineSpecError;
 
 // ─── PipelineSpec (untagged enum) ──────────────────────────────────────────
 
@@ -138,6 +140,212 @@ pub struct ModuleSet {
     pub unknown_fields: HashMap<String, serde_json::Value>,
 }
 
+// ─── Preset resolution ──────────────────────────────────────────────────────
+
+/// Valid canonical preset names, used in error hints.
+const VALID_PRESETS: &[&str] = &[
+    "textrank",
+    "position_rank",
+    "biased_textrank",
+    "single_rank",
+    "topical_pagerank",
+    "topic_rank",
+    "multipartite_rank",
+];
+
+/// Resolve a preset name to its default [`ModuleSet`].
+///
+/// Accepts the same aliases as [`Variant::parse()`](crate::variants::Variant::parse),
+/// but returns `Err(PipelineSpecError)` for unknown names instead of silently
+/// falling back to `TextRank`.
+///
+/// # Examples
+///
+/// ```
+/// # use textranker::pipeline::spec::resolve_preset;
+/// let ms = resolve_preset("position_rank").unwrap();
+/// assert!(ms.teleport.is_some());
+/// ```
+pub fn resolve_preset(name: &str) -> Result<ModuleSet, PipelineSpecError> {
+    match name.to_lowercase().as_str() {
+        // ── TextRank (base) ─────────────────────────────────────────
+        "textrank" | "text_rank" | "base" => Ok(ModuleSet::default()),
+
+        // ── PositionRank ────────────────────────────────────────────
+        "position_rank" | "positionrank" | "position" => Ok(ModuleSet {
+            teleport: Some(TeleportSpec::Position { shape: None }),
+            ..Default::default()
+        }),
+
+        // ── BiasedTextRank ──────────────────────────────────────────
+        "biased_textrank" | "biased" | "biasedtextrank" => Ok(ModuleSet {
+            teleport: Some(TeleportSpec::FocusTerms),
+            ..Default::default()
+        }),
+
+        // ── SingleRank ──────────────────────────────────────────────
+        "single_rank" | "singlerank" | "single" => Ok(ModuleSet {
+            graph: Some(GraphSpec::CooccurrenceWindow {
+                window_size: None,
+                cross_sentence: Some(true),
+                edge_weighting: None,
+            }),
+            ..Default::default()
+        }),
+
+        // ── TopicalPageRank ─────────────────────────────────────────
+        "topical_pagerank" | "topicalpagerank" | "single_tpr" | "tpr" => Ok(ModuleSet {
+            graph: Some(GraphSpec::CooccurrenceWindow {
+                window_size: None,
+                cross_sentence: Some(true),
+                edge_weighting: None,
+            }),
+            teleport: Some(TeleportSpec::TopicWeights),
+            ..Default::default()
+        }),
+
+        // ── TopicRank ───────────────────────────────────────────────
+        "topic_rank" | "topicrank" | "topic" => Ok(ModuleSet {
+            candidates: Some(CandidatesSpec::PhraseCandidates),
+            graph: Some(GraphSpec::TopicGraph),
+            clustering: Some(ClusteringSpec::Hac { threshold: Some(0.25) }),
+            ..Default::default()
+        }),
+
+        // ── MultipartiteRank ────────────────────────────────────────
+        "multipartite_rank" | "multipartiterank" | "multipartite" | "mpr" => Ok(ModuleSet {
+            candidates: Some(CandidatesSpec::PhraseCandidates),
+            graph: Some(GraphSpec::CandidateGraph),
+            clustering: Some(ClusteringSpec::Hac { threshold: None }),
+            graph_transforms: vec![
+                GraphTransformSpec::RemoveIntraClusterEdges,
+                GraphTransformSpec::AlphaBoost,
+            ],
+            ..Default::default()
+        }),
+
+        // ── Unknown ─────────────────────────────────────────────────
+        _ => Err(PipelineSpecError::new(
+            ErrorCode::InvalidValue,
+            "/preset",
+            format!("unknown preset name: '{name}'"),
+        )
+        .with_hint(format!("valid presets: {}", VALID_PRESETS.join(", ")))),
+    }
+}
+
+// ─── Spec resolution ────────────────────────────────────────────────────────
+
+/// Resolve a [`PipelineSpec`] to an effective [`PipelineSpecV1`] with preset
+/// defaults merged into the module set.
+///
+/// This performs the first two steps of the pipeline build lifecycle:
+///
+/// 1. **Preset string** → resolve name to a full `PipelineSpecV1` with
+///    preset-default modules (via [`resolve_preset()`]).
+/// 2. **V1 with preset** → resolve preset, then merge user modules over
+///    preset defaults (via [`merge_modules()`]).
+/// 3. **V1 without preset** → return as-is (user modules are used directly).
+///
+/// After resolution, the returned spec is ready for validation and stage
+/// construction.
+///
+/// # Errors
+///
+/// Returns `Err(PipelineSpecError)` if the preset name is unrecognized.
+pub fn resolve_spec(spec: &PipelineSpec) -> Result<PipelineSpecV1, PipelineSpecError> {
+    match spec {
+        PipelineSpec::Preset(name) => {
+            let modules = resolve_preset(name)?;
+            Ok(PipelineSpecV1 {
+                v: 1,
+                preset: Some(name.clone()),
+                modules,
+                runtime: RuntimeSpec::default(),
+                expose: None,
+                strict: false,
+                unknown_fields: HashMap::new(),
+            })
+        }
+        PipelineSpec::V1(v1) => {
+            if let Some(preset_name) = &v1.preset {
+                let preset_modules = resolve_preset(preset_name)?;
+                let merged = merge_modules(&v1.modules, &preset_modules);
+                Ok(PipelineSpecV1 {
+                    v: v1.v,
+                    preset: v1.preset.clone(),
+                    modules: merged,
+                    runtime: v1.runtime.clone(),
+                    expose: v1.expose.clone(),
+                    strict: v1.strict,
+                    unknown_fields: v1.unknown_fields.clone(),
+                })
+            } else {
+                Ok(v1.clone())
+            }
+        }
+    }
+}
+
+// ─── Module-set merging (config precedence) ────────────────────────────────
+
+/// Merge two [`ModuleSet`]s with `user` fields taking precedence over `preset`.
+///
+/// Implements the config precedence model:
+///
+/// 1. **`user`** — explicit module selections from `pipeline.modules.*` (highest)
+/// 2. **`preset`** — defaults from [`resolve_preset()`] (lowest)
+///
+/// For each `Option` field, `user.Some` wins; `None` falls through to preset.
+/// For `graph_transforms`, a non-empty user vec wins; empty inherits the preset.
+///
+/// When both sides carry the **same module variant** (e.g., both
+/// `CooccurrenceWindow`), optional parameters are deep-merged: user params
+/// override preset params, and `None` inherits the preset's value.  When
+/// variants differ, the user's variant wins entirely.
+///
+/// Level 2 of the precedence model — `TextRankConfig` defaults for `None`
+/// parameters — is handled downstream by [`SpecPipelineBuilder::build()`]
+/// (e.g., `window_size.unwrap_or(cfg.window_size)`).
+pub fn merge_modules(user: &ModuleSet, preset: &ModuleSet) -> ModuleSet {
+    // Helper: merge two Option<T> where T has a merge_with method.
+    macro_rules! merge_opt {
+        ($user:expr, $preset:expr, deep) => {
+            match (&$user, &$preset) {
+                (Some(u), Some(p)) => Some(u.merge_with(p)),
+                (Some(u), None) => Some(u.clone()),
+                (None, Some(p)) => Some(p.clone()),
+                (None, None) => None,
+            }
+        };
+        ($user:expr, $preset:expr) => {
+            $user.clone().or_else(|| $preset.clone())
+        };
+    }
+
+    let graph_transforms = if user.graph_transforms.is_empty() {
+        preset.graph_transforms.clone()
+    } else {
+        user.graph_transforms.clone()
+    };
+
+    let mut unknown_fields = preset.unknown_fields.clone();
+    unknown_fields.extend(user.unknown_fields.clone());
+
+    ModuleSet {
+        preprocess: merge_opt!(user.preprocess, preset.preprocess),
+        candidates: merge_opt!(user.candidates, preset.candidates),
+        graph: merge_opt!(user.graph, preset.graph, deep),
+        graph_transforms,
+        teleport: merge_opt!(user.teleport, preset.teleport, deep),
+        clustering: merge_opt!(user.clustering, preset.clustering, deep),
+        rank: merge_opt!(user.rank, preset.rank, deep),
+        phrases: merge_opt!(user.phrases, preset.phrases, deep),
+        format: merge_opt!(user.format, preset.format),
+        unknown_fields,
+    }
+}
+
 // ─── Module spec enums (internally tagged) ─────────────────────────────────
 
 /// Preprocessing strategy.
@@ -207,6 +415,27 @@ impl GraphSpec {
             Self::CandidateGraph => "candidate_graph",
         }
     }
+
+    /// Deep-merge optional parameters when both sides are the same variant.
+    /// `self` (user) takes precedence; `fallback` (preset) fills `None` gaps.
+    pub fn merge_with(&self, fallback: &Self) -> Self {
+        match (self, fallback) {
+            (
+                Self::CooccurrenceWindow { window_size, cross_sentence, edge_weighting },
+                Self::CooccurrenceWindow {
+                    window_size: fb_ws,
+                    cross_sentence: fb_cs,
+                    edge_weighting: fb_ew,
+                },
+            ) => Self::CooccurrenceWindow {
+                window_size: window_size.or(*fb_ws),
+                cross_sentence: cross_sentence.or(*fb_cs),
+                edge_weighting: edge_weighting.clone().or(fb_ew.clone()),
+            },
+            // Different variants — user wins entirely.
+            _ => self.clone(),
+        }
+    }
 }
 
 /// Edge weighting strategy for co-occurrence graphs.
@@ -266,6 +495,16 @@ impl TeleportSpec {
             Self::TopicWeights => "topic_weights",
         }
     }
+
+    /// Deep-merge optional parameters when both sides are the same variant.
+    pub fn merge_with(&self, fallback: &Self) -> Self {
+        match (self, fallback) {
+            (Self::Position { shape }, Self::Position { shape: fb_shape }) => Self::Position {
+                shape: shape.clone().or_else(|| fb_shape.clone()),
+            },
+            _ => self.clone(),
+        }
+    }
 }
 
 /// Clustering strategy for phrase candidates.
@@ -283,6 +522,15 @@ impl ClusteringSpec {
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Hac { .. } => "hac",
+        }
+    }
+
+    /// Deep-merge optional parameters when both sides are the same variant.
+    pub fn merge_with(&self, fallback: &Self) -> Self {
+        match (self, fallback) {
+            (Self::Hac { threshold }, Self::Hac { threshold: fb_th }) => Self::Hac {
+                threshold: threshold.or(*fb_th),
+            },
         }
     }
 }
@@ -311,6 +559,25 @@ impl RankSpec {
             Self::PersonalizedPagerank { .. } => "personalized_pagerank",
         }
     }
+
+    /// Deep-merge optional parameters when both sides are the same variant.
+    pub fn merge_with(&self, fallback: &Self) -> Self {
+        match (self, fallback) {
+            (
+                Self::PersonalizedPagerank { damping, max_iterations, convergence_threshold },
+                Self::PersonalizedPagerank {
+                    damping: fb_d,
+                    max_iterations: fb_mi,
+                    convergence_threshold: fb_ct,
+                },
+            ) => Self::PersonalizedPagerank {
+                damping: damping.or(*fb_d),
+                max_iterations: max_iterations.or(*fb_mi),
+                convergence_threshold: convergence_threshold.or(*fb_ct),
+            },
+            _ => self.clone(),
+        }
+    }
 }
 
 /// Phrase assembly strategy.
@@ -334,6 +601,31 @@ impl PhraseSpec {
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::ChunkPhrases { .. } => "chunk_phrases",
+        }
+    }
+
+    /// Deep-merge optional parameters when both sides are the same variant.
+    pub fn merge_with(&self, fallback: &Self) -> Self {
+        match (self, fallback) {
+            (
+                Self::ChunkPhrases {
+                    min_phrase_length,
+                    max_phrase_length,
+                    score_aggregation,
+                    phrase_grouping,
+                },
+                Self::ChunkPhrases {
+                    min_phrase_length: fb_min,
+                    max_phrase_length: fb_max,
+                    score_aggregation: fb_sa,
+                    phrase_grouping: fb_pg,
+                },
+            ) => Self::ChunkPhrases {
+                min_phrase_length: min_phrase_length.or(*fb_min),
+                max_phrase_length: max_phrase_length.or(*fb_max),
+                score_aggregation: score_aggregation.or(*fb_sa),
+                phrase_grouping: phrase_grouping.or(*fb_pg),
+            },
         }
     }
 }
@@ -1137,5 +1429,652 @@ mod tests {
             "chunk_phrases"
         );
         assert_eq!(FormatSpec::StandardJson.type_name(), "standard_json");
+    }
+
+    // ─── resolve_preset ───────────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_preset_textrank() {
+        let ms = resolve_preset("textrank").unwrap();
+        assert!(ms.candidates.is_none());
+        assert!(ms.graph.is_none());
+        assert!(ms.teleport.is_none());
+        assert!(ms.clustering.is_none());
+        assert!(ms.graph_transforms.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_preset_position_rank() {
+        let ms = resolve_preset("position_rank").unwrap();
+        assert!(ms.candidates.is_none());
+        assert!(ms.graph.is_none());
+        assert!(matches!(ms.teleport, Some(TeleportSpec::Position { .. })));
+        assert!(ms.clustering.is_none());
+        assert!(ms.graph_transforms.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_preset_biased_textrank() {
+        let ms = resolve_preset("biased_textrank").unwrap();
+        assert!(ms.candidates.is_none());
+        assert!(ms.graph.is_none());
+        assert!(matches!(ms.teleport, Some(TeleportSpec::FocusTerms)));
+        assert!(ms.clustering.is_none());
+        assert!(ms.graph_transforms.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_preset_single_rank() {
+        let ms = resolve_preset("single_rank").unwrap();
+        assert!(ms.candidates.is_none());
+        match &ms.graph {
+            Some(GraphSpec::CooccurrenceWindow { cross_sentence, .. }) => {
+                assert_eq!(*cross_sentence, Some(true));
+            }
+            other => panic!("expected CooccurrenceWindow, got {:?}", other),
+        }
+        assert!(ms.teleport.is_none());
+        assert!(ms.clustering.is_none());
+        assert!(ms.graph_transforms.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_preset_topical_pagerank() {
+        let ms = resolve_preset("topical_pagerank").unwrap();
+        assert!(ms.candidates.is_none());
+        match &ms.graph {
+            Some(GraphSpec::CooccurrenceWindow { cross_sentence, .. }) => {
+                assert_eq!(*cross_sentence, Some(true));
+            }
+            other => panic!("expected CooccurrenceWindow, got {:?}", other),
+        }
+        assert!(matches!(ms.teleport, Some(TeleportSpec::TopicWeights)));
+        assert!(ms.clustering.is_none());
+        assert!(ms.graph_transforms.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_preset_topic_rank() {
+        let ms = resolve_preset("topic_rank").unwrap();
+        assert!(matches!(ms.candidates, Some(CandidatesSpec::PhraseCandidates)));
+        assert!(matches!(ms.graph, Some(GraphSpec::TopicGraph)));
+        match &ms.clustering {
+            Some(ClusteringSpec::Hac { threshold }) => {
+                assert_eq!(*threshold, Some(0.25));
+            }
+            other => panic!("expected Hac, got {:?}", other),
+        }
+        assert!(ms.teleport.is_none());
+        assert!(ms.graph_transforms.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_preset_multipartite_rank() {
+        let ms = resolve_preset("multipartite_rank").unwrap();
+        assert!(matches!(ms.candidates, Some(CandidatesSpec::PhraseCandidates)));
+        assert!(matches!(ms.graph, Some(GraphSpec::CandidateGraph)));
+        assert!(ms.teleport.is_none());
+        assert!(matches!(ms.clustering, Some(ClusteringSpec::Hac { threshold: None })));
+        assert_eq!(ms.graph_transforms.len(), 2);
+        assert!(matches!(ms.graph_transforms[0], GraphTransformSpec::RemoveIntraClusterEdges));
+        assert!(matches!(ms.graph_transforms[1], GraphTransformSpec::AlphaBoost));
+    }
+
+    #[test]
+    fn test_resolve_preset_aliases_match_canonical() {
+        // Each alias should produce the same ModuleSet as its canonical name.
+        let canonical = resolve_preset("textrank").unwrap();
+        for alias in &["text_rank", "base"] {
+            let aliased = resolve_preset(alias).unwrap();
+            assert_eq!(
+                format!("{:?}", canonical),
+                format!("{:?}", aliased),
+                "alias '{alias}' differs from canonical 'textrank'"
+            );
+        }
+
+        let canonical = resolve_preset("position_rank").unwrap();
+        for alias in &["positionrank", "position"] {
+            let aliased = resolve_preset(alias).unwrap();
+            assert_eq!(
+                format!("{:?}", canonical),
+                format!("{:?}", aliased),
+                "alias '{alias}' differs from canonical 'position_rank'"
+            );
+        }
+
+        let canonical = resolve_preset("topical_pagerank").unwrap();
+        for alias in &["topicalpagerank", "single_tpr", "tpr"] {
+            let aliased = resolve_preset(alias).unwrap();
+            assert_eq!(
+                format!("{:?}", canonical),
+                format!("{:?}", aliased),
+                "alias '{alias}' differs from canonical 'topical_pagerank'"
+            );
+        }
+
+        let canonical = resolve_preset("multipartite_rank").unwrap();
+        for alias in &["multipartiterank", "multipartite", "mpr"] {
+            let aliased = resolve_preset(alias).unwrap();
+            assert_eq!(
+                format!("{:?}", canonical),
+                format!("{:?}", aliased),
+                "alias '{alias}' differs from canonical 'multipartite_rank'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_preset_case_insensitive() {
+        let lower = resolve_preset("textrank").unwrap();
+        let upper = resolve_preset("TEXTRANK").unwrap();
+        let mixed = resolve_preset("TextRank").unwrap();
+        let dbg_lower = format!("{:?}", lower);
+        assert_eq!(dbg_lower, format!("{:?}", upper));
+        assert_eq!(dbg_lower, format!("{:?}", mixed));
+    }
+
+    #[test]
+    fn test_resolve_preset_unknown_returns_error() {
+        let err = resolve_preset("nonexistent").unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidValue);
+        assert_eq!(err.path, "/preset");
+        assert!(err.message.contains("nonexistent"));
+        assert!(err.hint.as_ref().unwrap().contains("textrank"));
+        assert!(err.hint.as_ref().unwrap().contains("multipartite_rank"));
+    }
+
+    #[test]
+    fn test_resolve_preset_empty_string_returns_error() {
+        let err = resolve_preset("").unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidValue);
+    }
+
+    #[test]
+    fn test_resolve_preset_all_fields_none_except_set() {
+        // Verify that fields not set by a preset are None/empty/default.
+        for name in VALID_PRESETS {
+            let ms = resolve_preset(name).unwrap();
+            assert!(ms.preprocess.is_none(), "preset '{name}' set preprocess");
+            assert!(ms.rank.is_none(), "preset '{name}' set rank");
+            assert!(ms.phrases.is_none(), "preset '{name}' set phrases");
+            assert!(ms.format.is_none(), "preset '{name}' set format");
+            assert!(ms.unknown_fields.is_empty(), "preset '{name}' has unknown fields");
+        }
+    }
+
+    // ─── merge_modules ────────────────────────────────────────────────
+
+    #[test]
+    fn test_merge_user_overrides_preset() {
+        // User sets teleport; preset has graph. Both should appear in result.
+        let user = ModuleSet {
+            teleport: Some(TeleportSpec::Position { shape: None }),
+            ..Default::default()
+        };
+        let preset = ModuleSet {
+            graph: Some(GraphSpec::CooccurrenceWindow {
+                window_size: None,
+                cross_sentence: Some(true),
+                edge_weighting: None,
+            }),
+            ..Default::default()
+        };
+        let merged = merge_modules(&user, &preset);
+        assert!(matches!(merged.teleport, Some(TeleportSpec::Position { .. })));
+        assert!(matches!(merged.graph, Some(GraphSpec::CooccurrenceWindow { .. })));
+    }
+
+    #[test]
+    fn test_merge_user_replaces_preset_field() {
+        // Both set teleport — user wins.
+        let user = ModuleSet {
+            teleport: Some(TeleportSpec::FocusTerms),
+            ..Default::default()
+        };
+        let preset = ModuleSet {
+            teleport: Some(TeleportSpec::Position { shape: None }),
+            ..Default::default()
+        };
+        let merged = merge_modules(&user, &preset);
+        assert!(matches!(merged.teleport, Some(TeleportSpec::FocusTerms)));
+    }
+
+    #[test]
+    fn test_merge_empty_user_inherits_preset() {
+        let user = ModuleSet::default();
+        let preset = resolve_preset("single_rank").unwrap();
+        let merged = merge_modules(&user, &preset);
+        // Should be identical to preset.
+        assert_eq!(format!("{:?}", merged.graph), format!("{:?}", preset.graph));
+    }
+
+    #[test]
+    fn test_merge_graph_deep_params() {
+        // Preset: cross_sentence=true. User: window_size=5.
+        // Merged: both params present.
+        let user = ModuleSet {
+            graph: Some(GraphSpec::CooccurrenceWindow {
+                window_size: Some(5),
+                cross_sentence: None,
+                edge_weighting: None,
+            }),
+            ..Default::default()
+        };
+        let preset = ModuleSet {
+            graph: Some(GraphSpec::CooccurrenceWindow {
+                window_size: None,
+                cross_sentence: Some(true),
+                edge_weighting: None,
+            }),
+            ..Default::default()
+        };
+        let merged = merge_modules(&user, &preset);
+        match &merged.graph {
+            Some(GraphSpec::CooccurrenceWindow {
+                window_size,
+                cross_sentence,
+                ..
+            }) => {
+                assert_eq!(*window_size, Some(5));
+                assert_eq!(*cross_sentence, Some(true));
+            }
+            other => panic!("expected CooccurrenceWindow, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_graph_user_param_overrides_preset_param() {
+        // Both set cross_sentence — user's value wins.
+        let user = ModuleSet {
+            graph: Some(GraphSpec::CooccurrenceWindow {
+                window_size: None,
+                cross_sentence: Some(false),
+                edge_weighting: None,
+            }),
+            ..Default::default()
+        };
+        let preset = ModuleSet {
+            graph: Some(GraphSpec::CooccurrenceWindow {
+                window_size: Some(3),
+                cross_sentence: Some(true),
+                edge_weighting: None,
+            }),
+            ..Default::default()
+        };
+        let merged = merge_modules(&user, &preset);
+        match &merged.graph {
+            Some(GraphSpec::CooccurrenceWindow {
+                window_size,
+                cross_sentence,
+                ..
+            }) => {
+                assert_eq!(*window_size, Some(3)); // from preset
+                assert_eq!(*cross_sentence, Some(false)); // user overrides
+            }
+            other => panic!("expected CooccurrenceWindow, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_different_graph_variants_user_wins() {
+        // User: TopicGraph. Preset: CooccurrenceWindow.
+        // User wins entirely (no deep merge across different variants).
+        let user = ModuleSet {
+            graph: Some(GraphSpec::TopicGraph),
+            ..Default::default()
+        };
+        let preset = ModuleSet {
+            graph: Some(GraphSpec::CooccurrenceWindow {
+                window_size: Some(3),
+                cross_sentence: Some(true),
+                edge_weighting: None,
+            }),
+            ..Default::default()
+        };
+        let merged = merge_modules(&user, &preset);
+        assert!(matches!(merged.graph, Some(GraphSpec::TopicGraph)));
+    }
+
+    #[test]
+    fn test_merge_graph_transforms_user_nonempty_wins() {
+        let user = ModuleSet {
+            graph_transforms: vec![GraphTransformSpec::AlphaBoost],
+            ..Default::default()
+        };
+        let preset = ModuleSet {
+            graph_transforms: vec![
+                GraphTransformSpec::RemoveIntraClusterEdges,
+                GraphTransformSpec::AlphaBoost,
+            ],
+            ..Default::default()
+        };
+        let merged = merge_modules(&user, &preset);
+        assert_eq!(merged.graph_transforms.len(), 1);
+        assert!(matches!(merged.graph_transforms[0], GraphTransformSpec::AlphaBoost));
+    }
+
+    #[test]
+    fn test_merge_graph_transforms_user_empty_inherits() {
+        let user = ModuleSet::default();
+        let preset = ModuleSet {
+            graph_transforms: vec![
+                GraphTransformSpec::RemoveIntraClusterEdges,
+                GraphTransformSpec::AlphaBoost,
+            ],
+            ..Default::default()
+        };
+        let merged = merge_modules(&user, &preset);
+        assert_eq!(merged.graph_transforms.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_rank_deep_params() {
+        let user = ModuleSet {
+            rank: Some(RankSpec::PersonalizedPagerank {
+                damping: Some(0.9),
+                max_iterations: None,
+                convergence_threshold: None,
+            }),
+            ..Default::default()
+        };
+        let preset = ModuleSet {
+            rank: Some(RankSpec::PersonalizedPagerank {
+                damping: None,
+                max_iterations: Some(200),
+                convergence_threshold: Some(1e-5),
+            }),
+            ..Default::default()
+        };
+        let merged = merge_modules(&user, &preset);
+        match &merged.rank {
+            Some(RankSpec::PersonalizedPagerank {
+                damping,
+                max_iterations,
+                convergence_threshold,
+            }) => {
+                assert_eq!(*damping, Some(0.9));
+                assert_eq!(*max_iterations, Some(200));
+                assert_eq!(*convergence_threshold, Some(1e-5));
+            }
+            other => panic!("expected PersonalizedPagerank, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_clustering_deep_params() {
+        let user = ModuleSet {
+            clustering: Some(ClusteringSpec::Hac { threshold: Some(0.3) }),
+            ..Default::default()
+        };
+        let preset = ModuleSet {
+            clustering: Some(ClusteringSpec::Hac { threshold: Some(0.25) }),
+            ..Default::default()
+        };
+        let merged = merge_modules(&user, &preset);
+        match &merged.clustering {
+            Some(ClusteringSpec::Hac { threshold }) => {
+                assert_eq!(*threshold, Some(0.3)); // user wins
+            }
+            other => panic!("expected Hac, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_clustering_inherit_preset_threshold() {
+        let user = ModuleSet {
+            clustering: Some(ClusteringSpec::Hac { threshold: None }),
+            ..Default::default()
+        };
+        let preset = ModuleSet {
+            clustering: Some(ClusteringSpec::Hac { threshold: Some(0.25) }),
+            ..Default::default()
+        };
+        let merged = merge_modules(&user, &preset);
+        match &merged.clustering {
+            Some(ClusteringSpec::Hac { threshold }) => {
+                assert_eq!(*threshold, Some(0.25)); // from preset
+            }
+            other => panic!("expected Hac, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_phrases_deep_params() {
+        let user = ModuleSet {
+            phrases: Some(PhraseSpec::ChunkPhrases {
+                min_phrase_length: Some(2),
+                max_phrase_length: None,
+                score_aggregation: None,
+                phrase_grouping: None,
+            }),
+            ..Default::default()
+        };
+        let preset = ModuleSet {
+            phrases: Some(PhraseSpec::ChunkPhrases {
+                min_phrase_length: None,
+                max_phrase_length: Some(5),
+                score_aggregation: Some(ScoreAggregationSpec::Mean),
+                phrase_grouping: Some(PhraseGroupingSpec::Lemma),
+            }),
+            ..Default::default()
+        };
+        let merged = merge_modules(&user, &preset);
+        match &merged.phrases {
+            Some(PhraseSpec::ChunkPhrases {
+                min_phrase_length,
+                max_phrase_length,
+                score_aggregation,
+                phrase_grouping,
+            }) => {
+                assert_eq!(*min_phrase_length, Some(2));
+                assert_eq!(*max_phrase_length, Some(5));
+                assert_eq!(*score_aggregation, Some(ScoreAggregationSpec::Mean));
+                assert_eq!(*phrase_grouping, Some(PhraseGroupingSpec::Lemma));
+            }
+            other => panic!("expected ChunkPhrases, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_teleport_position_deep_params() {
+        let user = ModuleSet {
+            teleport: Some(TeleportSpec::Position { shape: None }),
+            ..Default::default()
+        };
+        let preset = ModuleSet {
+            teleport: Some(TeleportSpec::Position {
+                shape: Some("exponential".to_string()),
+            }),
+            ..Default::default()
+        };
+        let merged = merge_modules(&user, &preset);
+        match &merged.teleport {
+            Some(TeleportSpec::Position { shape }) => {
+                assert_eq!(shape.as_deref(), Some("exponential"));
+            }
+            other => panic!("expected Position, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_realistic_single_rank_with_overrides() {
+        // Start from single_rank preset, override window_size.
+        let preset = resolve_preset("single_rank").unwrap();
+        let user = ModuleSet {
+            graph: Some(GraphSpec::CooccurrenceWindow {
+                window_size: Some(5),
+                cross_sentence: None,
+                edge_weighting: Some(EdgeWeightingSpec::Binary),
+            }),
+            ..Default::default()
+        };
+        let merged = merge_modules(&user, &preset);
+        match &merged.graph {
+            Some(GraphSpec::CooccurrenceWindow {
+                window_size,
+                cross_sentence,
+                edge_weighting,
+            }) => {
+                assert_eq!(*window_size, Some(5)); // user
+                assert_eq!(*cross_sentence, Some(true)); // preset
+                assert_eq!(*edge_weighting, Some(EdgeWeightingSpec::Binary)); // user
+            }
+            other => panic!("expected CooccurrenceWindow, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_both_empty_returns_empty() {
+        let merged = merge_modules(&ModuleSet::default(), &ModuleSet::default());
+        assert!(merged.candidates.is_none());
+        assert!(merged.graph.is_none());
+        assert!(merged.teleport.is_none());
+        assert!(merged.clustering.is_none());
+        assert!(merged.rank.is_none());
+        assert!(merged.phrases.is_none());
+        assert!(merged.format.is_none());
+        assert!(merged.preprocess.is_none());
+        assert!(merged.graph_transforms.is_empty());
+    }
+
+    // ─── resolve_spec ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_spec_preset_string() {
+        let spec = PipelineSpec::Preset("position_rank".into());
+        let v1 = resolve_spec(&spec).unwrap();
+        assert_eq!(v1.v, 1);
+        assert_eq!(v1.preset.as_deref(), Some("position_rank"));
+        assert!(matches!(v1.modules.teleport, Some(TeleportSpec::Position { .. })));
+        assert!(v1.modules.graph.is_none());
+    }
+
+    #[test]
+    fn test_resolve_spec_v1_with_preset_merges_modules() {
+        // Start from single_rank preset (cross-sentence graph),
+        // override with position teleport.
+        let spec = PipelineSpec::V1(PipelineSpecV1 {
+            v: 1,
+            preset: Some("single_rank".into()),
+            modules: ModuleSet {
+                teleport: Some(TeleportSpec::Position { shape: None }),
+                ..Default::default()
+            },
+            runtime: Default::default(),
+            expose: None,
+            strict: false,
+            unknown_fields: HashMap::new(),
+        });
+        let v1 = resolve_spec(&spec).unwrap();
+        // Teleport comes from user override
+        assert!(matches!(v1.modules.teleport, Some(TeleportSpec::Position { .. })));
+        // Graph comes from preset (single_rank → cross-sentence)
+        match &v1.modules.graph {
+            Some(GraphSpec::CooccurrenceWindow { cross_sentence, .. }) => {
+                assert_eq!(*cross_sentence, Some(true));
+            }
+            other => panic!("expected CooccurrenceWindow from preset, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_resolve_spec_v1_without_preset_passes_through() {
+        let original = PipelineSpecV1 {
+            v: 1,
+            preset: None,
+            modules: ModuleSet {
+                teleport: Some(TeleportSpec::FocusTerms),
+                ..Default::default()
+            },
+            runtime: Default::default(),
+            expose: None,
+            strict: true,
+            unknown_fields: HashMap::new(),
+        };
+        let spec = PipelineSpec::V1(original.clone());
+        let v1 = resolve_spec(&spec).unwrap();
+        assert!(v1.preset.is_none());
+        assert!(matches!(v1.modules.teleport, Some(TeleportSpec::FocusTerms)));
+        assert!(v1.strict);
+    }
+
+    #[test]
+    fn test_resolve_spec_invalid_preset_string() {
+        let spec = PipelineSpec::Preset("nonexistent".into());
+        let err = resolve_spec(&spec).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidValue);
+        assert!(err.message.contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_resolve_spec_v1_invalid_preset() {
+        let spec = PipelineSpec::V1(PipelineSpecV1 {
+            v: 1,
+            preset: Some("bogus".into()),
+            modules: Default::default(),
+            runtime: Default::default(),
+            expose: None,
+            strict: false,
+            unknown_fields: HashMap::new(),
+        });
+        let err = resolve_spec(&spec).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidValue);
+    }
+
+    #[test]
+    fn test_resolve_spec_preserves_runtime_and_expose() {
+        let spec = PipelineSpec::V1(PipelineSpecV1 {
+            v: 1,
+            preset: Some("textrank".into()),
+            modules: Default::default(),
+            runtime: RuntimeSpec {
+                max_tokens: Some(50000),
+                deterministic: Some(true),
+                ..Default::default()
+            },
+            expose: Some(ExposeSpec {
+                graph_stats: true,
+                ..Default::default()
+            }),
+            strict: true,
+            unknown_fields: HashMap::new(),
+        });
+        let v1 = resolve_spec(&spec).unwrap();
+        assert_eq!(v1.runtime.max_tokens, Some(50000));
+        assert_eq!(v1.runtime.deterministic, Some(true));
+        assert!(v1.expose.as_ref().unwrap().graph_stats);
+        assert!(v1.strict);
+    }
+
+    #[test]
+    fn test_resolve_spec_v1_deep_merges_graph_params() {
+        // Preset: single_rank → graph with cross_sentence=true
+        // User: graph with window_size=5 (but no cross_sentence)
+        // Result: window_size=5 + cross_sentence=true (deep merge)
+        let spec = PipelineSpec::V1(PipelineSpecV1 {
+            v: 1,
+            preset: Some("single_rank".into()),
+            modules: ModuleSet {
+                graph: Some(GraphSpec::CooccurrenceWindow {
+                    window_size: Some(5),
+                    cross_sentence: None,
+                    edge_weighting: None,
+                }),
+                ..Default::default()
+            },
+            runtime: Default::default(),
+            expose: None,
+            strict: false,
+            unknown_fields: HashMap::new(),
+        });
+        let v1 = resolve_spec(&spec).unwrap();
+        match &v1.modules.graph {
+            Some(GraphSpec::CooccurrenceWindow { window_size, cross_sentence, .. }) => {
+                assert_eq!(*window_size, Some(5)); // from user
+                assert_eq!(*cross_sentence, Some(true)); // from preset
+            }
+            other => panic!("expected CooccurrenceWindow, got {:?}", other),
+        }
     }
 }

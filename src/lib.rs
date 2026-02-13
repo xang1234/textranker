@@ -47,19 +47,21 @@ pub use pipeline::spec::{
     GraphSpec, GraphTransformSpec, ModuleSet, NodeScoresSpec, PageRankExposeSpec,
     PhraseGroupingSpec, PhraseSpec, PipelineSpec, PipelineSpecV1, PreprocessSpec,
     RankSpec, RuntimeSpec, ScoreAggregationSpec, TeleportSpec,
+    merge_modules, resolve_preset, resolve_spec,
 };
 pub use pipeline::validation::{ValidationEngine, ValidationReport};
 pub use pipeline::{
     AlphaBoostWeighter, CandidateGraphBuilder, CandidateSelector, ChunkPhraseBuilder,
-    ClusterAssignments, Clusterer, CooccurrenceGraphBuilder, DebugLevel, EdgeWeightPolicy,
-    FocusTermsTeleportBuilder, IntraTopicEdgeRemover, JaccardHacClusterer, Linkage,
-    MultipartitePhraseBuilder, MultipartiteRankPipeline, MultipartiteTransform, NoopClusterer,
-    NoopGraphTransform, NoopPreprocessor, PhraseBuilder, TopicGraphBuilder, TopicRankPipeline,
-    TopicRepresentativeBuilder, TopicWeightsTeleportBuilder, TopicalPageRankPipeline,
-    PhraseCandidateSelector, PositionTeleportBuilder, Preprocessor, ResultFormatter,
-    StandardResultFormatter, TeleportBuilder, TeleportType, TeleportVector, TokenEntry,
-    TokenStream, TokenStreamRef, UniformTeleportBuilder, WindowGraphBuilder, WindowStrategy,
-    WordNodeSelector, DEFAULT_WINDOW_SIZE,
+    ClusterAssignments, Clusterer, CooccurrenceGraphBuilder, DebugLevel, DynPipeline,
+    EdgeWeightPolicy, FocusTermsTeleportBuilder, IntraTopicEdgeRemover, JaccardHacClusterer,
+    Linkage, MultipartitePhraseBuilder, MultipartiteRankPipeline, MultipartiteTransform,
+    NoopClusterer, NoopGraphTransform, NoopPreprocessor, PhraseBuilder, SpecPipelineBuilder,
+    TopicGraphBuilder, TopicRankPipeline, TopicRepresentativeBuilder,
+    TopicWeightsTeleportBuilder, TopicalPageRankPipeline, PhraseCandidateSelector,
+    PositionTeleportBuilder, Preprocessor, ResultFormatter, StandardResultFormatter,
+    TeleportBuilder, TeleportType, TeleportVector, TokenEntry, TokenStream, TokenStreamRef,
+    UniformTeleportBuilder, WindowGraphBuilder, WindowStrategy, WordNodeSelector,
+    DEFAULT_WINDOW_SIZE,
 };
 // Note: pipeline::GraphBuilder trait is NOT re-exported here to avoid
 // collision with graph::builder::GraphBuilder (the mutable builder struct).

@@ -2200,6 +2200,106 @@ impl PhraseBuilder for MultipartitePhraseBuilder {
     }
 }
 
+// ============================================================================
+// Blanket impls for trait-object dispatch (Box<dyn Trait>)
+// ============================================================================
+//
+// These impls allow `Pipeline<Box<dyn Preprocessor>, ..., Box<dyn ResultFormatter>>`
+// to satisfy the stage trait bounds required by `Pipeline::run()`. Each impl
+// simply delegates to the inner value via `(**self)`.
+
+impl Preprocessor for Box<dyn Preprocessor> {
+    fn preprocess(&self, tokens: &mut TokenStream, cfg: &TextRankConfig) {
+        (**self).preprocess(tokens, cfg)
+    }
+}
+
+impl CandidateSelector for Box<dyn CandidateSelector> {
+    fn select(&self, tokens: TokenStreamRef<'_>, cfg: &TextRankConfig) -> CandidateSet {
+        (**self).select(tokens, cfg)
+    }
+}
+
+impl GraphBuilder for Box<dyn GraphBuilder> {
+    fn build(
+        &self,
+        tokens: TokenStreamRef<'_>,
+        candidates: CandidateSetRef<'_>,
+        cfg: &TextRankConfig,
+    ) -> Graph {
+        (**self).build(tokens, candidates, cfg)
+    }
+}
+
+impl GraphTransform for Box<dyn GraphTransform> {
+    fn transform(
+        &self,
+        graph: &mut Graph,
+        tokens: TokenStreamRef<'_>,
+        candidates: CandidateSetRef<'_>,
+        cfg: &TextRankConfig,
+    ) {
+        (**self).transform(graph, tokens, candidates, cfg)
+    }
+}
+
+impl Clusterer for Box<dyn Clusterer> {
+    fn cluster(
+        &self,
+        candidates: CandidateSetRef<'_>,
+        cfg: &TextRankConfig,
+    ) -> ClusterAssignments {
+        (**self).cluster(candidates, cfg)
+    }
+}
+
+impl TeleportBuilder for Box<dyn TeleportBuilder> {
+    fn build(
+        &self,
+        tokens: TokenStreamRef<'_>,
+        candidates: CandidateSetRef<'_>,
+        cfg: &TextRankConfig,
+    ) -> Option<TeleportVector> {
+        (**self).build(tokens, candidates, cfg)
+    }
+}
+
+impl Ranker for Box<dyn Ranker> {
+    fn rank(
+        &self,
+        graph: &Graph,
+        teleport: Option<&TeleportVector>,
+        cfg: &TextRankConfig,
+    ) -> RankOutput {
+        (**self).rank(graph, teleport, cfg)
+    }
+}
+
+impl PhraseBuilder for Box<dyn PhraseBuilder> {
+    fn build(
+        &self,
+        tokens: TokenStreamRef<'_>,
+        candidates: CandidateSetRef<'_>,
+        ranks: &RankOutput,
+        graph: &Graph,
+        cfg: &TextRankConfig,
+    ) -> PhraseSet {
+        (**self).build(tokens, candidates, ranks, graph, cfg)
+    }
+}
+
+impl ResultFormatter for Box<dyn ResultFormatter> {
+    fn format(
+        &self,
+        phrases: &PhraseSet,
+        ranks: &RankOutput,
+        debug: Option<DebugPayload>,
+        cfg: &TextRankConfig,
+    ) -> FormattedResult {
+        (**self).format(phrases, ranks, debug, cfg)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
