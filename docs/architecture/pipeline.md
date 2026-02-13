@@ -148,20 +148,22 @@ These variants use word-level candidates, co-occurrence graphs, and chunk-based 
 |-------|-------------|-------------|---------------|------------|-----------------|
 | Preprocess | Noop | Noop | Noop | Noop | Noop |
 | Candidates | WordNode | WordNode | WordNode | WordNode | WordNode |
-| Graph | Window (sentence-bounded, binary) | Window (sentence-bounded, binary) | Window (sentence-bounded, binary) | Window (**cross-sentence, count-accum**) | Window (**cross-sentence, count-accum**) |
+| Graph | Window (sentence-bounded, count-accum) | Window (sentence-bounded, count-accum) | Window (sentence-bounded, count-accum) | Window (**cross-sentence**, count-accum) | Window (**cross-sentence**, count-accum) |
 | Transform | Noop | Noop | Noop | Noop | Noop |
 | Teleport | Uniform | **Position** | **FocusTerms** | Uniform | **TopicWeights** |
 | Rank | PageRank | PageRank | PageRank | PageRank | PageRank |
 | Phrases | Chunk | Chunk | Chunk | Chunk | Chunk |
 | Format | Standard | Standard | Standard | Standard | Standard |
 
+All five word-graph variants use count-accumulating edge weights by default (co-occurrence frequency is captured). The paper-standard binary-edge variant can be constructed manually with `EdgeWeightPolicy::Binary`.
+
 **Key differences:**
 
-- **BaseTextRank**: Baseline. Sentence-bounded window, binary edges, uniform teleport.
+- **BaseTextRank**: Baseline. Sentence-bounded window, uniform teleport.
 - **PositionRank**: Teleport biased by position — earlier words get higher teleport probability (`weight = 1/(position+1)`).
 - **BiasedTextRank**: Teleport biased toward user-specified focus terms with configurable `bias_weight`.
-- **SingleRank**: Window crosses sentence boundaries and accumulates co-occurrence counts as edge weights.
-- **TopicalPageRank**: SingleRank's graph + per-word topic weights (e.g., from LDA) as teleport bias.
+- **SingleRank**: Window crosses sentence boundaries (ignores sentence boundaries entirely).
+- **TopicalPageRank**: SingleRank's cross-sentence graph + per-word topic weights (e.g., from LDA) as teleport bias.
 
 ### Topic Family
 
