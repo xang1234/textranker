@@ -28,7 +28,8 @@ use crate::pipeline::traits::{
     GraphBuilder, GraphTransform, JaccardHacClusterer, MultipartitePhraseBuilder,
     MultipartiteTransform, NoopGraphTransform, NoopPreprocessor, PageRankRanker,
     PhraseCandidateSelector, PhraseBuilder, PositionTeleportBuilder, Preprocessor, Ranker,
-    ResultFormatter, StandardResultFormatter, TeleportBuilder, TopicGraphBuilder,
+    ResultFormatter, SentenceCandidateSelector, SentenceFormatter, SentenceGraphBuilder,
+    SentencePhraseBuilder, StandardResultFormatter, TeleportBuilder, TopicGraphBuilder,
     TopicRepresentativeBuilder, TopicWeightsTeleportBuilder, UniformTeleportBuilder,
     WindowGraphBuilder, WordNodeSelector,
 };
@@ -394,6 +395,60 @@ impl MultipartiteRankPipeline {
             ranker: PageRankRanker,
             phrase_builder: MultipartitePhraseBuilder,
             formatter: StandardResultFormatter,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SentenceRankPipeline — extractive summarization via sentence-level ranking
+// ---------------------------------------------------------------------------
+
+/// Pipeline alias for SentenceRank: whole sentences as candidates, Jaccard
+/// similarity graph, sentence-level phrase assembly, and optional
+/// position-based output ordering.
+///
+/// Suitable for extractive summarization: the `top_n` highest-ranked
+/// sentences are returned as "phrases" (each phrase text is a full sentence).
+pub type SentenceRankPipeline = Pipeline<
+    NoopPreprocessor,
+    SentenceCandidateSelector,
+    SentenceGraphBuilder,
+    NoopGraphTransform,
+    UniformTeleportBuilder,
+    PageRankRanker,
+    SentencePhraseBuilder,
+    SentenceFormatter,
+>;
+
+impl SentenceRankPipeline {
+    /// Build a SentenceRank pipeline with default settings (sort by score).
+    pub fn sentence_rank() -> Self {
+        Pipeline {
+            preprocessor: NoopPreprocessor,
+            selector: SentenceCandidateSelector,
+            graph_builder: SentenceGraphBuilder::default(),
+            graph_transform: NoopGraphTransform,
+            teleport_builder: UniformTeleportBuilder,
+            ranker: PageRankRanker,
+            phrase_builder: SentencePhraseBuilder,
+            formatter: SentenceFormatter::default(),
+        }
+    }
+
+    /// Build a SentenceRank pipeline that sorts output by document position
+    /// instead of score (useful for producing readable summaries).
+    pub fn sentence_rank_by_position() -> Self {
+        Pipeline {
+            preprocessor: NoopPreprocessor,
+            selector: SentenceCandidateSelector,
+            graph_builder: SentenceGraphBuilder::default(),
+            graph_transform: NoopGraphTransform,
+            teleport_builder: UniformTeleportBuilder,
+            ranker: PageRankRanker,
+            phrase_builder: SentencePhraseBuilder,
+            formatter: SentenceFormatter {
+                sort_by_position: true,
+            },
         }
     }
 }
@@ -2548,5 +2603,67 @@ mod tests {
 
         let result = pipeline.run_batch(std::iter::empty(), &cfg, &mut obs);
         assert!(result.is_empty());
+    }
+
+    // ── SentenceRankPipeline ────────────────────────────────────────
+
+    fn multi_sentence_tokens() -> Vec<Token> {
+        vec![
+            // Sentence 0: "Rust is a systems programming language"
+            Token { text: "Rust".into(), lemma: "rust".into(), pos: PosTag::ProperNoun, start: 0, end: 4, sentence_idx: 0, token_idx: 0, is_stopword: false },
+            Token { text: "is".into(), lemma: "be".into(), pos: PosTag::Verb, start: 5, end: 7, sentence_idx: 0, token_idx: 1, is_stopword: true },
+            Token { text: "a".into(), lemma: "a".into(), pos: PosTag::Determiner, start: 8, end: 9, sentence_idx: 0, token_idx: 2, is_stopword: true },
+            Token { text: "systems".into(), lemma: "system".into(), pos: PosTag::Noun, start: 10, end: 17, sentence_idx: 0, token_idx: 3, is_stopword: false },
+            Token { text: "programming".into(), lemma: "programming".into(), pos: PosTag::Noun, start: 18, end: 29, sentence_idx: 0, token_idx: 4, is_stopword: false },
+            Token { text: "language".into(), lemma: "language".into(), pos: PosTag::Noun, start: 30, end: 38, sentence_idx: 0, token_idx: 5, is_stopword: false },
+            // Sentence 1: "Python is popular for data science"
+            Token { text: "Python".into(), lemma: "python".into(), pos: PosTag::ProperNoun, start: 40, end: 46, sentence_idx: 1, token_idx: 6, is_stopword: false },
+            Token { text: "is".into(), lemma: "be".into(), pos: PosTag::Verb, start: 47, end: 49, sentence_idx: 1, token_idx: 7, is_stopword: true },
+            Token { text: "popular".into(), lemma: "popular".into(), pos: PosTag::Adjective, start: 50, end: 57, sentence_idx: 1, token_idx: 8, is_stopword: false },
+            Token { text: "for".into(), lemma: "for".into(), pos: PosTag::Preposition, start: 58, end: 61, sentence_idx: 1, token_idx: 9, is_stopword: true },
+            Token { text: "data".into(), lemma: "data".into(), pos: PosTag::Noun, start: 62, end: 66, sentence_idx: 1, token_idx: 10, is_stopword: false },
+            Token { text: "science".into(), lemma: "science".into(), pos: PosTag::Noun, start: 67, end: 74, sentence_idx: 1, token_idx: 11, is_stopword: false },
+            // Sentence 2: "Both languages support machine learning"
+            Token { text: "Both".into(), lemma: "both".into(), pos: PosTag::Determiner, start: 76, end: 80, sentence_idx: 2, token_idx: 12, is_stopword: true },
+            Token { text: "languages".into(), lemma: "language".into(), pos: PosTag::Noun, start: 81, end: 90, sentence_idx: 2, token_idx: 13, is_stopword: false },
+            Token { text: "support".into(), lemma: "support".into(), pos: PosTag::Verb, start: 91, end: 98, sentence_idx: 2, token_idx: 14, is_stopword: false },
+            Token { text: "machine".into(), lemma: "machine".into(), pos: PosTag::Noun, start: 99, end: 106, sentence_idx: 2, token_idx: 15, is_stopword: false },
+            Token { text: "learning".into(), lemma: "learning".into(), pos: PosTag::Noun, start: 107, end: 115, sentence_idx: 2, token_idx: 16, is_stopword: false },
+        ]
+    }
+
+    #[test]
+    fn test_sentence_rank_pipeline_constructs() {
+        let _pipeline = SentenceRankPipeline::sentence_rank();
+    }
+
+    #[test]
+    fn test_sentence_rank_by_position_constructs() {
+        let pipeline = SentenceRankPipeline::sentence_rank_by_position();
+        assert!(pipeline.formatter.sort_by_position);
+    }
+
+    #[test]
+    fn test_sentence_rank_produces_results() {
+        let pipeline = SentenceRankPipeline::sentence_rank();
+        let tokens = multi_sentence_tokens();
+        let stream = TokenStream::from_tokens(&tokens);
+        let cfg = TextRankConfig::default();
+        let mut obs = NoopObserver;
+
+        let result = pipeline.run(stream, &cfg, &mut obs);
+        assert!(!result.phrases.is_empty(), "SentenceRank should produce phrases");
+        assert!(result.converged);
+    }
+
+    #[test]
+    fn test_sentence_rank_empty_input() {
+        let pipeline = SentenceRankPipeline::sentence_rank();
+        let stream = TokenStream::from_tokens(&[]);
+        let cfg = TextRankConfig::default();
+        let mut obs = NoopObserver;
+
+        let result = pipeline.run(stream, &cfg, &mut obs);
+        assert!(result.phrases.is_empty());
     }
 }

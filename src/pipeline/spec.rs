@@ -151,6 +151,7 @@ pub const VALID_PRESETS: &[&str] = &[
     "topical_pagerank",
     "topic_rank",
     "multipartite_rank",
+    "sentence_rank",
 ];
 
 /// Resolve a preset name to its default [`ModuleSet`].
@@ -221,6 +222,15 @@ pub fn resolve_preset(name: &str) -> Result<ModuleSet, PipelineSpecError> {
                 GraphTransformSpec::RemoveIntraClusterEdges,
                 GraphTransformSpec::AlphaBoost,
             ],
+            ..Default::default()
+        }),
+
+        // ── SentenceRank ────────────────────────────────────────────
+        "sentence_rank" | "sentencerank" | "sentence" => Ok(ModuleSet {
+            candidates: Some(CandidatesSpec::SentenceCandidates),
+            graph: Some(GraphSpec::SentenceGraph { min_similarity: None }),
+            phrases: Some(PhraseSpec::SentencePhrases),
+            format: Some(FormatSpec::SentenceJson { sort_by_position: None }),
             ..Default::default()
         }),
 
@@ -1633,8 +1643,11 @@ mod tests {
             let ms = resolve_preset(name).unwrap();
             assert!(ms.preprocess.is_none(), "preset '{name}' set preprocess");
             assert!(ms.rank.is_none(), "preset '{name}' set rank");
-            assert!(ms.phrases.is_none(), "preset '{name}' set phrases");
-            assert!(ms.format.is_none(), "preset '{name}' set format");
+            // sentence_rank sets phrases and format (sentence-level stages)
+            if *name != "sentence_rank" {
+                assert!(ms.phrases.is_none(), "preset '{name}' set phrases");
+                assert!(ms.format.is_none(), "preset '{name}' set format");
+            }
             assert!(ms.unknown_fields.is_empty(), "preset '{name}' has unknown fields");
         }
     }
@@ -2111,6 +2124,34 @@ mod tests {
                 assert_eq!(*cross_sentence, Some(true)); // from preset
             }
             other => panic!("expected CooccurrenceWindow, got {:?}", other),
+        }
+    }
+
+    // ─── resolve_preset sentence_rank ───────────────────────────────
+
+    #[test]
+    fn test_resolve_preset_sentence_rank() {
+        let ms = resolve_preset("sentence_rank").unwrap();
+        assert!(matches!(ms.candidates, Some(CandidatesSpec::SentenceCandidates)));
+        assert!(matches!(ms.graph, Some(GraphSpec::SentenceGraph { min_similarity: None })));
+        assert!(matches!(ms.phrases, Some(PhraseSpec::SentencePhrases)));
+        assert!(matches!(ms.format, Some(FormatSpec::SentenceJson { sort_by_position: None })));
+        // Not set by sentence_rank
+        assert!(ms.teleport.is_none());
+        assert!(ms.clustering.is_none());
+        assert!(ms.graph_transforms.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_preset_sentence_rank_aliases() {
+        let canonical = resolve_preset("sentence_rank").unwrap();
+        for alias in &["sentencerank", "sentence"] {
+            let aliased = resolve_preset(alias).unwrap();
+            assert_eq!(
+                format!("{:?}", canonical),
+                format!("{:?}", aliased),
+                "alias '{alias}' differs from canonical 'sentence_rank'"
+            );
         }
     }
 }

@@ -23,6 +23,7 @@ pub enum Variant {
     SingleRank,
     TopicalPageRank,
     MultipartiteRank,
+    SentenceRank,
 }
 
 impl Variant {
@@ -39,6 +40,7 @@ impl Variant {
             "multipartite_rank" | "multipartiterank" | "multipartite" | "mpr" => {
                 Variant::MultipartiteRank
             }
+            "sentence_rank" | "sentencerank" | "sentence" => Variant::SentenceRank,
             _ => Variant::TextRank,
         }
     }

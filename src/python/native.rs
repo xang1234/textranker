@@ -6,6 +6,9 @@
 use crate::nlp::stopwords::StopwordFilter;
 use crate::nlp::tokenizer::Tokenizer;
 use crate::phrase::extraction::extract_keyphrases_with_info;
+use crate::pipeline::artifacts::TokenStream;
+use crate::pipeline::observer::NoopObserver;
+use crate::pipeline::runner::SentenceRankPipeline;
 use crate::types::{Phrase, PhraseGrouping, ScoreAggregation, TextRankConfig};
 use crate::variants::biased_textrank::BiasedTextRank;
 use crate::variants::multipartite_rank::MultipartiteRank;
@@ -832,6 +835,103 @@ impl PyMultipartiteRank {
         format!(
             "MultipartiteRank(alpha={}, similarity_threshold={}, top_n={})",
             self.alpha, self.similarity_threshold, self.config.top_n
+        )
+    }
+}
+
+/// SentenceRank extractive summarizer
+///
+/// Ranks whole sentences using TextRank with Jaccard-similarity edges.
+/// Returns the top-N most important sentences as an extractive summary.
+#[pyclass(name = "SentenceRank")]
+pub struct PySentenceRank {
+    config: TextRankConfig,
+    sort_by_position: bool,
+    thread_pool: Option<Arc<rayon::ThreadPool>>,
+}
+
+#[pymethods]
+impl PySentenceRank {
+    #[new]
+    #[pyo3(signature = (config=None, top_n=None, language=None, sort_by_position=false, max_threads=None))]
+    fn new(
+        config: Option<PyTextRankConfig>,
+        top_n: Option<usize>,
+        language: Option<&str>,
+        sort_by_position: bool,
+        max_threads: Option<usize>,
+    ) -> PyResult<Self> {
+        let mut inner_config = config.map(|c| c.inner).unwrap_or_default();
+
+        if let Some(n) = top_n {
+            inner_config.top_n = n;
+        }
+        if let Some(lang) = language {
+            inner_config.language = lang.to_string();
+        }
+
+        Ok(Self {
+            config: inner_config,
+            sort_by_position,
+            thread_pool: build_thread_pool(max_threads)?,
+        })
+    }
+
+    /// Extract the most important sentences from text
+    #[pyo3(signature = (text))]
+    fn extract_sentences(&self, py: Python<'_>, text: &str) -> PyResult<PyTextRankResult> {
+        let config = self.config.clone();
+        let text = text.to_owned();
+        let sort_by_position = self.sort_by_position;
+        let pool = self.thread_pool.clone();
+
+        let result = py.allow_threads(move || {
+            run_in_pool(&pool, move || {
+                let tokenizer = Tokenizer::new();
+                let (_, mut tokens) = tokenizer.tokenize(&text);
+
+                let stopwords = if config.stopwords.is_empty() {
+                    StopwordFilter::new(&config.language)
+                } else {
+                    StopwordFilter::with_additional(&config.language, &config.stopwords)
+                };
+                for token in &mut tokens {
+                    token.is_stopword = stopwords.is_stopword(&token.text);
+                }
+
+                let stream = TokenStream::from_tokens(&tokens);
+                let mut obs = NoopObserver;
+                let pipeline = if sort_by_position {
+                    SentenceRankPipeline::sentence_rank_by_position()
+                } else {
+                    SentenceRankPipeline::sentence_rank()
+                };
+                pipeline.run(stream, &config, &mut obs)
+            })
+        });
+
+        Ok(PyTextRankResult {
+            phrases: result.phrases.into_iter().map(PyPhrase::from).collect(),
+            converged: result.converged,
+            iterations: result.iterations as usize,
+        })
+    }
+
+    #[getter]
+    fn max_threads(&self) -> Option<usize> {
+        self.thread_pool.as_ref().map(|p| p.current_num_threads())
+    }
+
+    #[pyo3(signature = (max_threads=None))]
+    fn set_max_threads(&mut self, max_threads: Option<usize>) -> PyResult<()> {
+        self.thread_pool = build_thread_pool(max_threads)?;
+        Ok(())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SentenceRank(top_n={}, sort_by_position={}, language='{}')",
+            self.config.top_n, self.sort_by_position, self.config.language
         )
     }
 }

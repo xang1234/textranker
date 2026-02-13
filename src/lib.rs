@@ -55,7 +55,7 @@ pub use pipeline::{
     ClusterAssignments, Clusterer, CooccurrenceGraphBuilder, DebugLevel, DynPipeline,
     EdgeWeightPolicy, FocusTermsTeleportBuilder, IntraTopicEdgeRemover, JaccardHacClusterer,
     Linkage, MultipartitePhraseBuilder, MultipartiteRankPipeline, MultipartiteTransform,
-    NoopClusterer, NoopGraphTransform, NoopPreprocessor, PhraseBuilder, SentenceCandidateSelector,
+    NoopClusterer, NoopGraphTransform, NoopPreprocessor, PhraseBuilder, SentenceCandidateSelector, SentenceRankPipeline,
     SentenceFormatter, SentenceGraphBuilder, SentencePhraseBuilder, SpecPipelineBuilder,
     TopicGraphBuilder, TopicRankPipeline, TopicRepresentativeBuilder,
     TopicWeightsTeleportBuilder, TopicalPageRankPipeline, PhraseCandidateSelector,

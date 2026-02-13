@@ -7,6 +7,7 @@ use crate::phrase::chunker::NounChunker;
 use crate::phrase::extraction::extract_keyphrases_with_info;
 use crate::pipeline::artifacts::{PipelineWorkspace, TokenStream};
 use crate::pipeline::observer::NoopObserver;
+use crate::pipeline::runner::SentenceRankPipeline;
 use crate::pipeline::spec::{resolve_spec, PipelineSpec, PipelineSpecV1, VALID_PRESETS};
 use crate::pipeline::spec_builder::SpecPipelineBuilder;
 use crate::pipeline::validation::{ValidationDiagnostic, ValidationEngine, ValidationReport};
@@ -299,6 +300,17 @@ fn extract_with_variant(
             .with_similarity_threshold(json_config.multipartite_similarity_threshold)
             .with_alpha(json_config.multipartite_alpha)
             .extract_with_info(tokens),
+        Variant::SentenceRank => {
+            let stream = TokenStream::from_tokens(tokens);
+            let mut obs = NoopObserver;
+            let formatted = SentenceRankPipeline::sentence_rank()
+                .run(stream, config, &mut obs);
+            crate::phrase::extraction::ExtractionResult {
+                phrases: formatted.phrases,
+                converged: formatted.converged,
+                iterations: formatted.iterations as usize,
+            }
+        }
     }
 }
 
@@ -2355,5 +2367,37 @@ mod tests {
         let result_a = process_single_doc(doc_a).unwrap();
         let result_b = process_single_doc_with_workspace(doc_b, None).unwrap();
         assert_eq!(result_a, result_b);
+    }
+
+    // ─── SentenceRank variant dispatch ──────────────────────────────
+
+    #[test]
+    fn test_sentence_rank_variant_dispatch() {
+        let json_input = format!(
+            r#"{{"tokens": {}, "variant": "sentence_rank", "config": {{"determinism": "deterministic"}}}}"#,
+            pipeline_test_tokens_json()
+        );
+        let result = process_single_doc(
+            serde_json::from_str::<JsonDocument>(&json_input).unwrap(),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(parsed.get("phrases").is_some());
+        assert!(parsed.get("converged").is_some());
+    }
+
+    #[test]
+    fn test_sentence_rank_pipeline_preset() {
+        let json_input = format!(
+            r#"{{"tokens": {}, "pipeline": "sentence_rank", "config": {{"determinism": "deterministic"}}}}"#,
+            pipeline_test_tokens_json()
+        );
+        let result = process_single_doc(
+            serde_json::from_str::<JsonDocument>(&json_input).unwrap(),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(parsed.get("phrases").is_some());
+        assert!(parsed.get("converged").is_some());
     }
 }

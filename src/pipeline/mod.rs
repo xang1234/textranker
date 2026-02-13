@@ -38,8 +38,8 @@ pub use observer::{
 // Re-export runner types (Pipeline, builder, type alias).
 pub use runner::{
     BaseTextRankPipeline, BiasedTextRankPipeline, MultipartiteRankPipeline, Pipeline,
-    PipelineBuilder, PositionRankPipeline, SingleRankPipeline, TopicRankPipeline,
-    TopicalPageRankPipeline,
+    PipelineBuilder, PositionRankPipeline, SentenceRankPipeline, SingleRankPipeline,
+    TopicRankPipeline, TopicalPageRankPipeline,
 };
 
 // Re-export preset resolution, spec resolution, and module merging.
