@@ -176,7 +176,7 @@ pub const VALID_PRESETS: &[&str] = &[
 /// # Examples
 ///
 /// ```
-/// # use textranker::pipeline::spec::resolve_preset;
+/// # use rapid_textrank::pipeline::spec::resolve_preset;
 /// let ms = resolve_preset("position_rank").unwrap();
 /// assert!(ms.teleport.is_some());
 /// ```
