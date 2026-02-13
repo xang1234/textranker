@@ -647,7 +647,7 @@ mod tests {
         let spec: PipelineSpec = serde_json::from_str(r#"{
             "v": 1,
             "strict": true,
-            "expose": {}
+            "bogus_field": 42
         }"#).unwrap();
         let resp = validate_spec_impl(&spec);
         assert!(!resp.valid);
@@ -655,7 +655,7 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         let diags = json["diagnostics"].as_array().unwrap();
         assert_eq!(diags[0]["code"], "unknown_field");
-        assert_eq!(diags[0]["path"], "/expose");
+        assert_eq!(diags[0]["path"], "/bogus_field");
     }
 
     #[test]

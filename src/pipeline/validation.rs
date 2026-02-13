@@ -887,12 +887,12 @@ mod tests {
     #[test]
     fn test_unknown_field_path_includes_field_name() {
         let report = engine().validate(&spec(
-            r#"{ "v": 1, "strict": true, "expose": {} }"#,
+            r#"{ "v": 1, "strict": true, "bogus_field": 42 }"#,
         ));
         let err = report.errors().next().unwrap();
-        assert_eq!(err.path, "/expose");
+        assert_eq!(err.path, "/bogus_field");
         assert_eq!(err.code, ErrorCode::UnknownField);
-        assert!(err.message.contains("expose"));
+        assert!(err.message.contains("bogus_field"));
     }
 
     #[test]
