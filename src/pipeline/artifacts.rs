@@ -1584,7 +1584,7 @@ impl DebugLevel {
 /// | `node_scores`         |         |     ✓      |   ✓    |
 /// | `residuals`           |         |            |   ✓    |
 /// | `cluster_memberships` |         |            |   ✓    |
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DebugPayload {
     /// Top-K node scores (node lemma → score), sorted by score descending.
     pub node_scores: Option<Vec<(String, f64)>>,
@@ -1603,7 +1603,7 @@ pub struct DebugPayload {
 }
 
 /// Summary statistics for the co-occurrence graph.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphStats {
     pub num_nodes: usize,
     pub num_edges: usize,
@@ -1612,7 +1612,7 @@ pub struct GraphStats {
 }
 
 /// Convergence summary from PageRank.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConvergenceSummary {
     /// Number of iterations performed.
     pub iterations: u32,
