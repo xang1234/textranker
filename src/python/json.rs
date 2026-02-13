@@ -5,7 +5,7 @@
 
 use crate::phrase::chunker::NounChunker;
 use crate::phrase::extraction::extract_keyphrases_with_info;
-use crate::pipeline::artifacts::TokenStream;
+use crate::pipeline::artifacts::{PipelineWorkspace, TokenStream};
 use crate::pipeline::observer::NoopObserver;
 use crate::pipeline::spec::{resolve_spec, PipelineSpec, PipelineSpecV1, VALID_PRESETS};
 use crate::pipeline::spec_builder::SpecPipelineBuilder;
@@ -379,36 +379,66 @@ pub fn validate_spec_impl(spec: &PipelineSpecV1) -> ValidationResponse {
     }
 }
 
-/// Extract keyphrases from JSON input
-///
-/// Args:
-///     json_input: JSON string containing tokens and optional config.
-///         When `validate_only` is true and `pipeline` is present,
-///         returns a validation report instead of extraction results.
-///
-/// Returns:
-///     JSON string with extracted phrases, or a validation report
-#[pyfunction]
-#[pyo3(signature = (json_input))]
-pub fn extract_from_json(py: Python<'_>, json_input: &str) -> PyResult<String> {
-    // Parse input (cheap — no need to release GIL)
-    let doc: JsonDocument = serde_json::from_str(json_input)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
+/// Convert an `ExtractionResult` (from legacy variant dispatch) into a `JsonResult`.
+fn extraction_to_json_result(
+    result: crate::phrase::extraction::ExtractionResult,
+) -> JsonResult {
+    JsonResult {
+        phrases: result
+            .phrases
+            .into_iter()
+            .map(|p| JsonPhrase {
+                text: p.text,
+                lemma: p.lemma,
+                score: p.score,
+                count: p.count,
+                rank: p.rank,
+            })
+            .collect(),
+        converged: result.converged,
+        iterations: result.iterations,
+    }
+}
 
-    // Handle capabilities discovery (cheapest path, no parsing needed)
+/// Convert a `FormattedResult` (from modular pipeline) into a `JsonResult`.
+fn formatted_to_json_result(
+    result: crate::pipeline::artifacts::FormattedResult,
+) -> JsonResult {
+    JsonResult {
+        phrases: result
+            .phrases
+            .into_iter()
+            .map(|p| JsonPhrase {
+                text: p.text,
+                lemma: p.lemma,
+                score: p.score,
+                count: p.count,
+                rank: p.rank,
+            })
+            .collect(),
+        converged: result.converged,
+        iterations: result.iterations as usize,
+    }
+}
+
+/// Process a single `JsonDocument` → serialized JSON result string.
+///
+/// Handles capabilities, validate_only, pipeline spec, and legacy variant
+/// dispatch.  Pure Rust — no PyO3 dependency — so it can be called from
+/// both `extract_from_json` (single doc) and `extract_jsonl_from_json`
+/// (streaming).
+fn process_single_doc(doc: JsonDocument) -> Result<String, String> {
+    // Capabilities discovery (cheapest path)
     if doc.capabilities {
         let response = build_capabilities();
-        return serde_json::to_string(&response)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
+        return serde_json::to_string(&response).map_err(|e| e.to_string());
     }
 
-    // Handle validate-only mode (fast path, no extraction)
+    // Validate-only mode (fast path, no extraction)
     if doc.validate_only {
-        let pipeline_spec = doc.pipeline.ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err(
-                "validate_only requires a 'pipeline' field",
-            )
-        })?;
+        let pipeline_spec = doc
+            .pipeline
+            .ok_or_else(|| "validate_only requires a 'pipeline' field".to_string())?;
         let response = match resolve_spec(&pipeline_spec) {
             Ok(resolved) => validate_spec_impl(&resolved),
             Err(err) => ValidationResponse {
@@ -418,15 +448,12 @@ pub fn extract_from_json(py: Python<'_>, json_input: &str) -> PyResult<String> {
                 },
             },
         };
-        return serde_json::to_string(&response)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
+        return serde_json::to_string(&response).map_err(|e| e.to_string());
     }
 
-    // Convert config
+    // Convert config & tokens
     let json_config = doc.config.unwrap_or_default();
     let config: TextRankConfig = json_config.clone().into();
-
-    // Convert tokens
     let mut tokens: Vec<Token> = doc.tokens.into_iter().map(Token::from).collect();
 
     if !config.stopwords.is_empty() {
@@ -441,81 +468,204 @@ pub fn extract_from_json(py: Python<'_>, json_input: &str) -> PyResult<String> {
         }
     }
 
-    // Pipeline path — when `pipeline` is present, use the modular pipeline system.
-    // This takes precedence over the `variant` field.
+    // Pipeline path — takes precedence over `variant`
     if let Some(ref spec) = doc.pipeline {
-        let spec_owned = spec.clone();
-        let json_config_owned = json_config.clone();
-        let result = py.allow_threads(move || {
-            let chunks = NounChunker::new()
-                .with_min_length(config.min_phrase_length)
-                .with_max_length(config.max_phrase_length)
-                .extract_chunks(&tokens);
+        let chunks = NounChunker::new()
+            .with_min_length(config.min_phrase_length)
+            .with_max_length(config.max_phrase_length)
+            .extract_chunks(&tokens);
 
-            let builder = SpecPipelineBuilder::new()
-                .with_chunks(chunks)
-                .with_focus_terms(json_config_owned.focus_terms.clone(), json_config_owned.bias_weight)
-                .with_topic_weights(json_config_owned.topic_weights.clone(), json_config_owned.topic_min_weight);
+        let builder = SpecPipelineBuilder::new()
+            .with_chunks(chunks)
+            .with_focus_terms(json_config.focus_terms.clone(), json_config.bias_weight)
+            .with_topic_weights(
+                json_config.topic_weights.clone(),
+                json_config.topic_min_weight,
+            );
 
-            let pipeline = builder.build_from_spec(&spec_owned, &config)?;
-            let stream = TokenStream::from_tokens(&tokens);
-            let mut obs = NoopObserver;
-            Ok::<_, crate::pipeline::errors::PipelineSpecError>(pipeline.run(stream, &config, &mut obs))
-        });
+        let pipeline = builder
+            .build_from_spec(spec, &config)
+            .map_err(|e| e.to_string())?;
+        let stream = TokenStream::from_tokens(&tokens);
+        let mut obs = NoopObserver;
+        let formatted = pipeline.run(stream, &config, &mut obs);
 
-        let formatted = result.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-
-        let json_result = JsonResult {
-            phrases: formatted
-                .phrases
-                .into_iter()
-                .map(|p| JsonPhrase {
-                    text: p.text,
-                    lemma: p.lemma,
-                    score: p.score,
-                    count: p.count,
-                    rank: p.rank,
-                })
-                .collect(),
-            converged: formatted.converged,
-            iterations: formatted.iterations as usize,
-        };
-
-        return serde_json::to_string(&json_result)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
+        let json_result = formatted_to_json_result(formatted);
+        return serde_json::to_string(&json_result).map_err(|e| e.to_string());
     }
 
-    // Old variant dispatch path (fallback when `pipeline` is absent)
+    // Legacy variant dispatch (fallback when `pipeline` is absent)
     let variant = doc
         .variant
         .as_deref()
         .and_then(|value| value.parse().ok())
         .unwrap_or(Variant::TextRank);
 
-    // Release the GIL for CPU-intensive extraction.
-    let extraction = py.allow_threads(move || {
-        extract_with_variant(&tokens, &config, &json_config, variant)
+    let extraction = extract_with_variant(&tokens, &config, &json_config, variant);
+    let json_result = extraction_to_json_result(extraction);
+    serde_json::to_string(&json_result).map_err(|e| e.to_string())
+}
+
+/// Process a single `JsonDocument` with optional workspace reuse.
+///
+/// When `workspace` is `Some`, pipeline-path documents call
+/// `pipeline.run_with_workspace()` (clearing first) instead of `pipeline.run()`.
+/// Legacy variant and non-extraction paths ignore the workspace.
+fn process_single_doc_with_workspace(
+    doc: JsonDocument,
+    workspace: Option<&mut PipelineWorkspace>,
+) -> Result<String, String> {
+    // Capabilities discovery (cheapest path)
+    if doc.capabilities {
+        let response = build_capabilities();
+        return serde_json::to_string(&response).map_err(|e| e.to_string());
+    }
+
+    // Validate-only mode (fast path, no extraction)
+    if doc.validate_only {
+        let pipeline_spec = doc
+            .pipeline
+            .ok_or_else(|| "validate_only requires a 'pipeline' field".to_string())?;
+        let response = match resolve_spec(&pipeline_spec) {
+            Ok(resolved) => validate_spec_impl(&resolved),
+            Err(err) => ValidationResponse {
+                valid: false,
+                report: ValidationReport {
+                    diagnostics: vec![ValidationDiagnostic::error(err)],
+                },
+            },
+        };
+        return serde_json::to_string(&response).map_err(|e| e.to_string());
+    }
+
+    // Convert config & tokens
+    let json_config = doc.config.unwrap_or_default();
+    let config: TextRankConfig = json_config.clone().into();
+    let mut tokens: Vec<Token> = doc.tokens.into_iter().map(Token::from).collect();
+
+    if !config.stopwords.is_empty() {
+        let stopwords = crate::nlp::stopwords::StopwordFilter::with_additional(
+            &config.language,
+            &config.stopwords,
+        );
+        for token in &mut tokens {
+            if stopwords.is_stopword(&token.text) {
+                token.is_stopword = true;
+            }
+        }
+    }
+
+    // Pipeline path — takes precedence over `variant`
+    if let Some(ref spec) = doc.pipeline {
+        let chunks = NounChunker::new()
+            .with_min_length(config.min_phrase_length)
+            .with_max_length(config.max_phrase_length)
+            .extract_chunks(&tokens);
+
+        let builder = SpecPipelineBuilder::new()
+            .with_chunks(chunks)
+            .with_focus_terms(json_config.focus_terms.clone(), json_config.bias_weight)
+            .with_topic_weights(
+                json_config.topic_weights.clone(),
+                json_config.topic_min_weight,
+            );
+
+        let pipeline = builder
+            .build_from_spec(spec, &config)
+            .map_err(|e| e.to_string())?;
+        let stream = TokenStream::from_tokens(&tokens);
+        let mut obs = NoopObserver;
+        let formatted = match workspace {
+            Some(ws) => {
+                ws.clear();
+                pipeline.run_with_workspace(stream, &config, &mut obs, ws)
+            }
+            None => pipeline.run(stream, &config, &mut obs),
+        };
+
+        let json_result = formatted_to_json_result(formatted);
+        return serde_json::to_string(&json_result).map_err(|e| e.to_string());
+    }
+
+    // Legacy variant dispatch (fallback when `pipeline` is absent)
+    let variant = doc
+        .variant
+        .as_deref()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(Variant::TextRank);
+
+    let extraction = extract_with_variant(&tokens, &config, &json_config, variant);
+    let json_result = extraction_to_json_result(extraction);
+    serde_json::to_string(&json_result).map_err(|e| e.to_string())
+}
+
+/// Extract keyphrases from JSON input
+///
+/// Args:
+///     json_input: JSON string containing tokens and optional config.
+///         When `validate_only` is true and `pipeline` is present,
+///         returns a validation report instead of extraction results.
+///
+/// Returns:
+///     JSON string with extracted phrases, or a validation report
+#[pyfunction]
+#[pyo3(signature = (json_input))]
+pub fn extract_from_json(py: Python<'_>, json_input: &str) -> PyResult<String> {
+    let doc: JsonDocument = serde_json::from_str(json_input)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
+
+    py.allow_threads(move || process_single_doc(doc))
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
+}
+
+/// Extract keyphrases from JSONL (newline-delimited JSON) input.
+///
+/// Each non-blank input line is parsed as an independent `JsonDocument`
+/// and processed through the same logic as `extract_from_json`.
+/// Output is a JSONL string with one result line per non-blank input line.
+///
+/// Per-line error handling: a malformed or failing line produces
+/// `{"error": "..."}` on the corresponding output line; processing
+/// continues for subsequent lines.
+///
+/// Args:
+///     jsonl_input: JSONL string — one JSON document per line.
+///
+/// Returns:
+///     JSONL string with one result per non-blank input line.
+#[pyfunction]
+#[pyo3(signature = (jsonl_input))]
+pub fn extract_jsonl_from_json(py: Python<'_>, jsonl_input: &str) -> PyResult<String> {
+    let input = jsonl_input.to_owned();
+    let result = py.allow_threads(move || {
+        let mut output = String::new();
+        for line in input.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let result_line = match serde_json::from_str::<JsonDocument>(trimmed) {
+                Ok(doc) => match process_single_doc(doc) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        serde_json::to_string(&serde_json::json!({ "error": e })).unwrap()
+                    }
+                },
+                Err(e) => {
+                    serde_json::to_string(&serde_json::json!({
+                        "error": format!("Invalid JSON: {e}")
+                    }))
+                    .unwrap()
+                }
+            };
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&result_line);
+        }
+        output
     });
-
-    // Build result (cheap serialization)
-    let result = JsonResult {
-        phrases: extraction
-            .phrases
-            .into_iter()
-            .map(|p| JsonPhrase {
-                text: p.text,
-                lemma: p.lemma,
-                score: p.score,
-                count: p.count,
-                rank: p.rank,
-            })
-            .collect(),
-        converged: extraction.converged,
-        iterations: extraction.iterations,
-    };
-
-    serde_json::to_string(&result)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    Ok(result)
 }
 
 /// Validate a pipeline specification without running extraction.
@@ -607,6 +757,80 @@ pub fn extract_batch_from_json(py: Python<'_>, json_input: &str) -> PyResult<Str
 
     serde_json::to_string(&results)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+}
+
+/// Python iterator that yields one JSON result string per document.
+///
+/// Created by [`extract_batch_iter`].  Reuses a single [`PipelineWorkspace`]
+/// across pipeline-path documents so PageRank buffers are allocated once and
+/// cleared (not freed) between iterations.
+#[pyclass(name = "BatchIter")]
+pub struct JsonBatchIter {
+    docs: Vec<Option<JsonDocument>>,
+    index: usize,
+    workspace: PipelineWorkspace,
+}
+
+#[pymethods]
+impl JsonBatchIter {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> Option<String> {
+        while self.index < self.docs.len() {
+            let idx = self.index;
+            self.index += 1;
+            if let Some(doc) = self.docs[idx].take() {
+                // Move workspace out so it can cross into allow_threads closure.
+                // std::mem::take swaps with Default (empty vecs) — zero allocation.
+                let mut ws = std::mem::take(&mut self.workspace);
+                let (result, ws_back) = py.allow_threads(move || {
+                    let r = process_single_doc_with_workspace(doc, Some(&mut ws));
+                    (r, ws)
+                });
+                self.workspace = ws_back;
+                return Some(match result {
+                    Ok(json) => json,
+                    Err(e) => {
+                        serde_json::to_string(&serde_json::json!({ "error": e })).unwrap()
+                    }
+                });
+            }
+        }
+        None
+    }
+
+    fn __len__(&self) -> usize {
+        self.docs.len()
+    }
+
+    #[getter]
+    fn remaining(&self) -> usize {
+        self.docs.len().saturating_sub(self.index)
+    }
+}
+
+/// Create a lazy batch iterator over JSON documents.
+///
+/// Args:
+///     json_input: JSON string containing an array of documents (same format
+///         as `extract_batch_from_json`).
+///
+/// Returns:
+///     A `BatchIter` that yields one JSON result string per document.
+///     Each call to `__next__` releases the GIL during processing and
+///     reuses internal PageRank buffers across pipeline-path documents.
+#[pyfunction]
+#[pyo3(signature = (json_input))]
+pub fn extract_batch_iter(json_input: &str) -> PyResult<JsonBatchIter> {
+    let docs: Vec<JsonDocument> = serde_json::from_str(json_input)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
+    Ok(JsonBatchIter {
+        docs: docs.into_iter().map(Some).collect(),
+        index: 0,
+        workspace: PipelineWorkspace::new(),
+    })
 }
 
 #[cfg(test)]
@@ -1921,5 +2145,215 @@ mod tests {
                 a.text, a.score, b.score
             );
         }
+    }
+
+    // ─── JSONL streaming tests ──────────────────────────────────────────
+
+    /// Helper: a minimal valid JsonDocument as a compact single-line JSON string
+    /// (JSONL requires no embedded newlines).
+    fn jsonl_test_line() -> String {
+        // Parse the pretty-printed tokens, re-serialize compact
+        let tokens: serde_json::Value =
+            serde_json::from_str(pipeline_test_tokens_json()).unwrap();
+        let compact_tokens = serde_json::to_string(&tokens).unwrap();
+        format!(
+            r#"{{"tokens": {}, "config": {{"determinism": "deterministic"}}}}"#,
+            compact_tokens
+        )
+    }
+
+    #[test]
+    fn test_jsonl_single_line() {
+        let input = jsonl_test_line();
+        let output = process_single_doc(
+            serde_json::from_str::<JsonDocument>(&input).unwrap(),
+        )
+        .unwrap();
+
+        // Should be a single JSON object with "phrases"
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert!(parsed.get("phrases").is_some());
+        assert!(parsed.get("converged").is_some());
+    }
+
+    #[test]
+    fn test_jsonl_multiple_lines() {
+        let line = jsonl_test_line();
+        let input = format!("{line}\n{line}\n{line}");
+
+        // Simulate extract_jsonl_from_json logic (without PyO3)
+        let mut output = String::new();
+        for raw_line in input.lines() {
+            let trimmed = raw_line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let result_line = match serde_json::from_str::<JsonDocument>(trimmed) {
+                Ok(doc) => process_single_doc(doc).unwrap_or_else(|e| {
+                    serde_json::to_string(&serde_json::json!({ "error": e })).unwrap()
+                }),
+                Err(e) => {
+                    serde_json::to_string(&serde_json::json!({
+                        "error": format!("Invalid JSON: {e}")
+                    }))
+                    .unwrap()
+                }
+            };
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&result_line);
+        }
+
+        let output_lines: Vec<&str> = output.lines().collect();
+        assert_eq!(output_lines.len(), 3, "expected 3 result lines, got {}", output_lines.len());
+
+        // Each line should parse as valid JSON with phrases
+        for (i, ol) in output_lines.iter().enumerate() {
+            let parsed: serde_json::Value = serde_json::from_str(ol)
+                .unwrap_or_else(|e| panic!("line {i} is not valid JSON: {e}"));
+            assert!(parsed.get("phrases").is_some(), "line {i} missing 'phrases'");
+        }
+    }
+
+    #[test]
+    fn test_jsonl_error_line() {
+        let good = jsonl_test_line();
+        let bad = r#"{"this is not valid json"#;
+        let input = format!("{good}\n{bad}\n{good}");
+
+        let mut output = String::new();
+        for raw_line in input.lines() {
+            let trimmed = raw_line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let result_line = match serde_json::from_str::<JsonDocument>(trimmed) {
+                Ok(doc) => process_single_doc(doc).unwrap_or_else(|e| {
+                    serde_json::to_string(&serde_json::json!({ "error": e })).unwrap()
+                }),
+                Err(e) => {
+                    serde_json::to_string(&serde_json::json!({
+                        "error": format!("Invalid JSON: {e}")
+                    }))
+                    .unwrap()
+                }
+            };
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&result_line);
+        }
+
+        let output_lines: Vec<&str> = output.lines().collect();
+        assert_eq!(output_lines.len(), 3, "expected 3 output lines (including error)");
+
+        // Line 0: good → phrases
+        let l0: serde_json::Value = serde_json::from_str(output_lines[0]).unwrap();
+        assert!(l0.get("phrases").is_some(), "line 0 should have phrases");
+
+        // Line 1: bad → error
+        let l1: serde_json::Value = serde_json::from_str(output_lines[1]).unwrap();
+        assert!(l1.get("error").is_some(), "line 1 should have error");
+        let err_msg = l1["error"].as_str().unwrap();
+        assert!(err_msg.contains("Invalid JSON"), "error should mention Invalid JSON, got: {err_msg}");
+
+        // Line 2: good → phrases
+        let l2: serde_json::Value = serde_json::from_str(output_lines[2]).unwrap();
+        assert!(l2.get("phrases").is_some(), "line 2 should have phrases");
+    }
+
+    #[test]
+    fn test_jsonl_blank_lines_skipped() {
+        let line = jsonl_test_line();
+        // Input with blank lines, whitespace-only lines, and trailing newline
+        let input = format!("\n  \n{line}\n\n  \t  \n{line}\n");
+
+        let mut output = String::new();
+        for raw_line in input.lines() {
+            let trimmed = raw_line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let result_line = match serde_json::from_str::<JsonDocument>(trimmed) {
+                Ok(doc) => process_single_doc(doc).unwrap_or_else(|e| {
+                    serde_json::to_string(&serde_json::json!({ "error": e })).unwrap()
+                }),
+                Err(e) => {
+                    serde_json::to_string(&serde_json::json!({
+                        "error": format!("Invalid JSON: {e}")
+                    }))
+                    .unwrap()
+                }
+            };
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&result_line);
+        }
+
+        let output_lines: Vec<&str> = output.lines().collect();
+        assert_eq!(
+            output_lines.len(),
+            2,
+            "blank/whitespace lines should be skipped, expected 2 result lines, got {}",
+            output_lines.len()
+        );
+    }
+
+    // ─── Workspace-reusing process_single_doc_with_workspace tests ────
+
+    #[test]
+    fn test_process_single_doc_with_workspace_pipeline_path() {
+        // Pipeline-path document with workspace should produce identical results
+        // to pipeline-path without workspace.
+        let json_input = format!(
+            r#"{{"tokens": {}, "pipeline": "textrank", "config": {{"determinism": "deterministic"}}}}"#,
+            pipeline_test_tokens_json()
+        );
+        let doc_a: JsonDocument = serde_json::from_str(&json_input).unwrap();
+        let doc_b: JsonDocument = serde_json::from_str(&json_input).unwrap();
+        let mut ws = PipelineWorkspace::new();
+
+        let result_without = process_single_doc_with_workspace(doc_a, None).unwrap();
+        let result_with = process_single_doc_with_workspace(doc_b, Some(&mut ws)).unwrap();
+        assert_eq!(result_without, result_with);
+
+        // Verify the result is valid
+        let parsed: serde_json::Value = serde_json::from_str(&result_with).unwrap();
+        assert!(parsed.get("phrases").is_some());
+        assert!(parsed["converged"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_process_single_doc_with_workspace_variant_path() {
+        // Legacy variant path with workspace=Some should still work fine
+        // (workspace is simply ignored for variant dispatch).
+        let json_input = format!(
+            r#"{{"tokens": {}, "config": {{"determinism": "deterministic"}}}}"#,
+            pipeline_test_tokens_json()
+        );
+        let doc: JsonDocument = serde_json::from_str(&json_input).unwrap();
+        let mut ws = PipelineWorkspace::new();
+
+        let result = process_single_doc_with_workspace(doc, Some(&mut ws));
+        assert!(result.is_ok());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+        assert!(parsed.get("phrases").is_some());
+    }
+
+    #[test]
+    fn test_process_single_doc_with_workspace_none() {
+        // Passing workspace=None should work identically to process_single_doc.
+        let json_input = format!(
+            r#"{{"tokens": {}, "pipeline": "textrank", "config": {{"determinism": "deterministic"}}}}"#,
+            pipeline_test_tokens_json()
+        );
+        let doc_a: JsonDocument = serde_json::from_str(&json_input).unwrap();
+        let doc_b: JsonDocument = serde_json::from_str(&json_input).unwrap();
+
+        let result_a = process_single_doc(doc_a).unwrap();
+        let result_b = process_single_doc_with_workspace(doc_b, None).unwrap();
+        assert_eq!(result_a, result_b);
     }
 }
