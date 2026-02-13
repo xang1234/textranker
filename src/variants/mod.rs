@@ -23,6 +23,7 @@ pub enum Variant {
     SingleRank,
     TopicalPageRank,
     MultipartiteRank,
+    #[cfg(feature = "sentence-rank")]
     SentenceRank,
 }
 
@@ -40,6 +41,7 @@ impl Variant {
             "multipartite_rank" | "multipartiterank" | "multipartite" | "mpr" => {
                 Variant::MultipartiteRank
             }
+            #[cfg(feature = "sentence-rank")]
             "sentence_rank" | "sentencerank" | "sentence" => Variant::SentenceRank,
             _ => Variant::TextRank,
         }

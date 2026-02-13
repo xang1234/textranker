@@ -55,14 +55,18 @@ pub use pipeline::{
     ClusterAssignments, Clusterer, CooccurrenceGraphBuilder, DebugLevel, DynPipeline,
     EdgeWeightPolicy, FocusTermsTeleportBuilder, IntraTopicEdgeRemover, JaccardHacClusterer,
     Linkage, MultipartitePhraseBuilder, MultipartiteRankPipeline, MultipartiteTransform,
-    NoopClusterer, NoopGraphTransform, NoopPreprocessor, PhraseBuilder, SentenceCandidateSelector, SentenceRankPipeline,
-    SentenceFormatter, SentenceGraphBuilder, SentencePhraseBuilder, SpecPipelineBuilder,
+    NoopClusterer, NoopGraphTransform, NoopPreprocessor, PhraseBuilder, SpecPipelineBuilder,
     TopicGraphBuilder, TopicRankPipeline, TopicRepresentativeBuilder,
     TopicWeightsTeleportBuilder, TopicalPageRankPipeline, PhraseCandidateSelector,
     PositionTeleportBuilder, Preprocessor, ResultFormatter, StandardResultFormatter,
     TeleportBuilder, TeleportType, TeleportVector, TokenEntry, TokenStream, TokenStreamRef,
     UniformTeleportBuilder, WindowGraphBuilder, WindowStrategy, WordNodeSelector,
     DEFAULT_WINDOW_SIZE,
+};
+#[cfg(feature = "sentence-rank")]
+pub use pipeline::{
+    SentenceCandidateSelector, SentenceFormatter, SentenceGraphBuilder,
+    SentencePhraseBuilder, SentenceRankPipeline,
 };
 // Note: pipeline::GraphBuilder trait is NOT re-exported here to avoid
 // collision with graph::builder::GraphBuilder (the mutable builder struct).

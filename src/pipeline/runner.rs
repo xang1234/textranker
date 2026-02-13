@@ -28,10 +28,13 @@ use crate::pipeline::traits::{
     GraphBuilder, GraphTransform, JaccardHacClusterer, MultipartitePhraseBuilder,
     MultipartiteTransform, NoopGraphTransform, NoopPreprocessor, PageRankRanker,
     PhraseCandidateSelector, PhraseBuilder, PositionTeleportBuilder, Preprocessor, Ranker,
-    ResultFormatter, SentenceCandidateSelector, SentenceFormatter, SentenceGraphBuilder,
-    SentencePhraseBuilder, StandardResultFormatter, TeleportBuilder, TopicGraphBuilder,
+    ResultFormatter, StandardResultFormatter, TeleportBuilder, TopicGraphBuilder,
     TopicRepresentativeBuilder, TopicWeightsTeleportBuilder, UniformTeleportBuilder,
     WindowGraphBuilder, WordNodeSelector,
+};
+#[cfg(feature = "sentence-rank")]
+use crate::pipeline::traits::{
+    SentenceCandidateSelector, SentenceFormatter, SentenceGraphBuilder, SentencePhraseBuilder,
 };
 use std::collections::HashMap;
 use crate::types::TextRankConfig;
@@ -409,6 +412,7 @@ impl MultipartiteRankPipeline {
 ///
 /// Suitable for extractive summarization: the `top_n` highest-ranked
 /// sentences are returned as "phrases" (each phrase text is a full sentence).
+#[cfg(feature = "sentence-rank")]
 pub type SentenceRankPipeline = Pipeline<
     NoopPreprocessor,
     SentenceCandidateSelector,
@@ -420,6 +424,7 @@ pub type SentenceRankPipeline = Pipeline<
     SentenceFormatter,
 >;
 
+#[cfg(feature = "sentence-rank")]
 impl SentenceRankPipeline {
     /// Build a SentenceRank pipeline with default settings (sort by score).
     pub fn sentence_rank() -> Self {
@@ -2607,6 +2612,7 @@ mod tests {
 
     // ── SentenceRankPipeline ────────────────────────────────────────
 
+    #[cfg(feature = "sentence-rank")]
     fn multi_sentence_tokens() -> Vec<Token> {
         vec![
             // Sentence 0: "Rust is a systems programming language"
@@ -2632,17 +2638,20 @@ mod tests {
         ]
     }
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_rank_pipeline_constructs() {
         let _pipeline = SentenceRankPipeline::sentence_rank();
     }
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_rank_by_position_constructs() {
         let pipeline = SentenceRankPipeline::sentence_rank_by_position();
         assert!(pipeline.formatter.sort_by_position);
     }
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_rank_produces_results() {
         let pipeline = SentenceRankPipeline::sentence_rank();
@@ -2656,6 +2665,7 @@ mod tests {
         assert!(result.converged);
     }
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_rank_empty_input() {
         let pipeline = SentenceRankPipeline::sentence_rank();

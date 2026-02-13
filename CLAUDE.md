@@ -26,6 +26,20 @@ PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 cargo test --lib
 
 Two pre-existing tests in `python::json::tests` (`test_json_include_pos_filtering` and `test_json_include_pos_multiple_tags`) fail. These are not caused by recent changes — they are a known issue in the POS-filtering logic. Do not let them block your work.
 
+### Feature flags
+
+The `sentence-rank` feature (enabled by default) gates the SentenceRank extractive summarization module. To test without it:
+
+```bash
+PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 cargo test --lib --no-default-features --features python
+```
+
+For complete test coverage across all features:
+
+```bash
+PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 cargo test --lib --all-features
+```
+
 ### Python wheel build
 
 ```bash

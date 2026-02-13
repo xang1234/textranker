@@ -7,6 +7,7 @@ use crate::phrase::chunker::NounChunker;
 use crate::phrase::extraction::extract_keyphrases_with_info;
 use crate::pipeline::artifacts::{PipelineWorkspace, TokenStream};
 use crate::pipeline::observer::NoopObserver;
+#[cfg(feature = "sentence-rank")]
 use crate::pipeline::runner::SentenceRankPipeline;
 use crate::pipeline::spec::{resolve_spec, PipelineSpec, PipelineSpecV1, VALID_PRESETS};
 use crate::pipeline::spec_builder::SpecPipelineBuilder;
@@ -300,6 +301,7 @@ fn extract_with_variant(
             .with_similarity_threshold(json_config.multipartite_similarity_threshold)
             .with_alpha(json_config.multipartite_alpha)
             .extract_with_info(tokens),
+        #[cfg(feature = "sentence-rank")]
         Variant::SentenceRank => {
             let stream = TokenStream::from_tokens(tokens);
             let mut obs = NoopObserver;
@@ -361,14 +363,31 @@ pub struct CapabilitiesResponse {
 pub fn build_capabilities() -> CapabilitiesResponse {
     let mut modules = HashMap::new();
     modules.insert("preprocess".into(), vec!["default".into()]);
-    modules.insert("candidates".into(), vec!["word_nodes".into(), "phrase_candidates".into(), "sentence_candidates".into()]);
-    modules.insert("graph".into(), vec!["cooccurrence_window".into(), "topic_graph".into(), "candidate_graph".into(), "sentence_graph".into()]);
+
+    let mut candidates = vec!["word_nodes".into(), "phrase_candidates".into()];
+    #[cfg(feature = "sentence-rank")]
+    candidates.push("sentence_candidates".into());
+    modules.insert("candidates".into(), candidates);
+
+    let mut graph = vec!["cooccurrence_window".into(), "topic_graph".into(), "candidate_graph".into()];
+    #[cfg(feature = "sentence-rank")]
+    graph.push("sentence_graph".into());
+    modules.insert("graph".into(), graph);
+
     modules.insert("graph_transforms".into(), vec!["remove_intra_cluster_edges".into(), "alpha_boost".into()]);
     modules.insert("teleport".into(), vec!["uniform".into(), "position".into(), "focus_terms".into(), "topic_weights".into()]);
     modules.insert("clustering".into(), vec!["hac".into()]);
     modules.insert("rank".into(), vec!["standard_pagerank".into(), "personalized_pagerank".into()]);
-    modules.insert("phrases".into(), vec!["chunk_phrases".into(), "sentence_phrases".into()]);
-    modules.insert("format".into(), vec!["standard_json".into(), "sentence_json".into()]);
+
+    let mut phrases = vec!["chunk_phrases".into()];
+    #[cfg(feature = "sentence-rank")]
+    phrases.push("sentence_phrases".into());
+    modules.insert("phrases".into(), phrases);
+
+    let mut format = vec!["standard_json".into()];
+    #[cfg(feature = "sentence-rank")]
+    format.push("sentence_json".into());
+    modules.insert("format".into(), format);
 
     CapabilitiesResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -2371,6 +2390,7 @@ mod tests {
 
     // ─── SentenceRank variant dispatch ──────────────────────────────
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_rank_variant_dispatch() {
         let json_input = format!(
@@ -2386,6 +2406,7 @@ mod tests {
         assert!(parsed.get("converged").is_some());
     }
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_rank_pipeline_preset() {
         let json_input = format!(

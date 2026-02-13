@@ -143,6 +143,7 @@ pub struct ModuleSet {
 // ─── Preset resolution ──────────────────────────────────────────────────────
 
 /// Valid canonical preset names, used in error hints and capability discovery.
+#[cfg(feature = "sentence-rank")]
 pub const VALID_PRESETS: &[&str] = &[
     "textrank",
     "position_rank",
@@ -152,6 +153,18 @@ pub const VALID_PRESETS: &[&str] = &[
     "topic_rank",
     "multipartite_rank",
     "sentence_rank",
+];
+
+/// Valid canonical preset names, used in error hints and capability discovery.
+#[cfg(not(feature = "sentence-rank"))]
+pub const VALID_PRESETS: &[&str] = &[
+    "textrank",
+    "position_rank",
+    "biased_textrank",
+    "single_rank",
+    "topical_pagerank",
+    "topic_rank",
+    "multipartite_rank",
 ];
 
 /// Resolve a preset name to its default [`ModuleSet`].
@@ -226,6 +239,7 @@ pub fn resolve_preset(name: &str) -> Result<ModuleSet, PipelineSpecError> {
         }),
 
         // ── SentenceRank ────────────────────────────────────────────
+        #[cfg(feature = "sentence-rank")]
         "sentence_rank" | "sentencerank" | "sentence" => Ok(ModuleSet {
             candidates: Some(CandidatesSpec::SentenceCandidates),
             graph: Some(GraphSpec::SentenceGraph { min_similarity: None }),
@@ -383,6 +397,7 @@ pub enum CandidatesSpec {
     /// Noun-phrase chunks as candidates (TopicRank/MultipartiteRank family).
     PhraseCandidates,
     /// Whole sentences as candidates (SentenceRank / extractive summarization).
+    #[cfg(feature = "sentence-rank")]
     SentenceCandidates,
 }
 
@@ -391,6 +406,7 @@ impl CandidatesSpec {
         match self {
             Self::WordNodes => "word_nodes",
             Self::PhraseCandidates => "phrase_candidates",
+            #[cfg(feature = "sentence-rank")]
             Self::SentenceCandidates => "sentence_candidates",
         }
     }
@@ -414,6 +430,7 @@ pub enum GraphSpec {
     /// Candidate-level graph with inter-cluster edges (MultipartiteRank).
     CandidateGraph,
     /// Sentence-level graph with Jaccard-similarity edges (SentenceRank).
+    #[cfg(feature = "sentence-rank")]
     SentenceGraph {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         min_similarity: Option<f64>,
@@ -431,6 +448,7 @@ impl GraphSpec {
             Self::CooccurrenceWindow { .. } => "cooccurrence_window",
             Self::TopicGraph => "topic_graph",
             Self::CandidateGraph => "candidate_graph",
+            #[cfg(feature = "sentence-rank")]
             Self::SentenceGraph { .. } => "sentence_graph",
         }
     }
@@ -451,6 +469,7 @@ impl GraphSpec {
                 cross_sentence: cross_sentence.or(*fb_cs),
                 edge_weighting: edge_weighting.clone().or(fb_ew.clone()),
             },
+            #[cfg(feature = "sentence-rank")]
             (
                 Self::SentenceGraph { min_similarity },
                 Self::SentenceGraph { min_similarity: fb_ms },
@@ -621,6 +640,7 @@ pub enum PhraseSpec {
         phrase_grouping: Option<PhraseGroupingSpec>,
     },
     /// Sentence-level phrase assembly (SentenceRank / extractive summarization).
+    #[cfg(feature = "sentence-rank")]
     SentencePhrases,
 }
 
@@ -628,6 +648,7 @@ impl PhraseSpec {
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::ChunkPhrases { .. } => "chunk_phrases",
+            #[cfg(feature = "sentence-rank")]
             Self::SentencePhrases => "sentence_phrases",
         }
     }
@@ -684,6 +705,7 @@ pub enum FormatSpec {
     /// Standard JSON output format.
     StandardJson,
     /// Sentence-level JSON output with optional position-based sorting.
+    #[cfg(feature = "sentence-rank")]
     SentenceJson {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sort_by_position: Option<bool>,
@@ -694,6 +716,7 @@ impl FormatSpec {
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::StandardJson => "standard_json",
+            #[cfg(feature = "sentence-rank")]
             Self::SentenceJson { .. } => "sentence_json",
         }
     }
@@ -1426,9 +1449,11 @@ mod tests {
         assert_eq!(PreprocessSpec::Default.type_name(), "default");
         assert_eq!(CandidatesSpec::WordNodes.type_name(), "word_nodes");
         assert_eq!(CandidatesSpec::PhraseCandidates.type_name(), "phrase_candidates");
+        #[cfg(feature = "sentence-rank")]
         assert_eq!(CandidatesSpec::SentenceCandidates.type_name(), "sentence_candidates");
         assert_eq!(GraphSpec::TopicGraph.type_name(), "topic_graph");
         assert_eq!(GraphSpec::CandidateGraph.type_name(), "candidate_graph");
+        #[cfg(feature = "sentence-rank")]
         assert_eq!(
             GraphSpec::SentenceGraph { min_similarity: None }.type_name(),
             "sentence_graph"
@@ -1469,8 +1494,10 @@ mod tests {
             .type_name(),
             "chunk_phrases"
         );
+        #[cfg(feature = "sentence-rank")]
         assert_eq!(PhraseSpec::SentencePhrases.type_name(), "sentence_phrases");
         assert_eq!(FormatSpec::StandardJson.type_name(), "standard_json");
+        #[cfg(feature = "sentence-rank")]
         assert_eq!(
             FormatSpec::SentenceJson { sort_by_position: None }.type_name(),
             "sentence_json"
@@ -1644,7 +1671,15 @@ mod tests {
             assert!(ms.preprocess.is_none(), "preset '{name}' set preprocess");
             assert!(ms.rank.is_none(), "preset '{name}' set rank");
             // sentence_rank sets phrases and format (sentence-level stages)
-            if *name != "sentence_rank" {
+            #[cfg(feature = "sentence-rank")]
+            if *name == "sentence_rank" {
+                // sentence_rank is expected to set phrases and format
+            } else {
+                assert!(ms.phrases.is_none(), "preset '{name}' set phrases");
+                assert!(ms.format.is_none(), "preset '{name}' set format");
+            }
+            #[cfg(not(feature = "sentence-rank"))]
+            {
                 assert!(ms.phrases.is_none(), "preset '{name}' set phrases");
                 assert!(ms.format.is_none(), "preset '{name}' set format");
             }
@@ -2129,6 +2164,7 @@ mod tests {
 
     // ─── resolve_preset sentence_rank ───────────────────────────────
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_resolve_preset_sentence_rank() {
         let ms = resolve_preset("sentence_rank").unwrap();
@@ -2142,6 +2178,7 @@ mod tests {
         assert!(ms.graph_transforms.is_empty());
     }
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_resolve_preset_sentence_rank_aliases() {
         let canonical = resolve_preset("sentence_rank").unwrap();

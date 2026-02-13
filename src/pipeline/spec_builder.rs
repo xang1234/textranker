@@ -28,14 +28,18 @@ use crate::pipeline::spec::{
 };
 use crate::pipeline::validation::ValidationEngine;
 use crate::pipeline::traits::{
-    CandidateGraphBuilder, CandidateSelector, ChunkPhraseBuilder, Clusterer, SentenceGraphBuilder,
+    CandidateGraphBuilder, CandidateSelector, ChunkPhraseBuilder, Clusterer,
     EdgeWeightPolicy, FocusTermsTeleportBuilder, GraphBuilder, GraphTransform,
     JaccardHacClusterer, MultipartitePhraseBuilder, MultipartiteTransform, NoopGraphTransform,
     NoopPreprocessor, PageRankRanker, PhraseBuilder, PhraseCandidateSelector,
-    PositionTeleportBuilder, Preprocessor, Ranker, ResultFormatter, SentenceCandidateSelector,
-    SentenceFormatter, SentencePhraseBuilder, StandardResultFormatter, TeleportBuilder,
+    PositionTeleportBuilder, Preprocessor, Ranker, ResultFormatter,
+    StandardResultFormatter, TeleportBuilder,
     TopicGraphBuilder, TopicRepresentativeBuilder, TopicWeightsTeleportBuilder,
     UniformTeleportBuilder, WindowGraphBuilder, WindowStrategy, WordNodeSelector,
+};
+#[cfg(feature = "sentence-rank")]
+use crate::pipeline::traits::{
+    SentenceCandidateSelector, SentenceFormatter, SentenceGraphBuilder, SentencePhraseBuilder,
 };
 use crate::pipeline::artifacts::{
     CandidateSetRef, Graph, TokenStreamRef,
@@ -167,6 +171,7 @@ impl SpecPipelineBuilder {
                 }
                 Box::new(PhraseCandidateSelector::new(self.chunks.clone()))
             }
+            #[cfg(feature = "sentence-rank")]
             Some(CandidatesSpec::SentenceCandidates) => {
                 Box::new(SentenceCandidateSelector)
             }
@@ -225,6 +230,7 @@ impl SpecPipelineBuilder {
                 let clust_spec = clustering_spec.as_ref().unwrap();
                 Box::new(CandidateGraphBuilder::new(make_clusterer(clust_spec)))
             }
+            #[cfg(feature = "sentence-rank")]
             Some(GraphSpec::SentenceGraph { min_similarity }) => {
                 let mut b = SentenceGraphBuilder::default();
                 if let Some(ms) = min_similarity {
@@ -290,6 +296,7 @@ impl SpecPipelineBuilder {
             Some(crate::pipeline::spec::PhraseSpec::ChunkPhrases { .. }) => {
                 Box::new(ChunkPhraseBuilder)
             }
+            #[cfg(feature = "sentence-rank")]
             Some(crate::pipeline::spec::PhraseSpec::SentencePhrases) => {
                 Box::new(SentencePhraseBuilder)
             }
@@ -298,6 +305,7 @@ impl SpecPipelineBuilder {
                 match &modules.graph {
                     Some(GraphSpec::TopicGraph) => Box::new(TopicRepresentativeBuilder),
                     Some(GraphSpec::CandidateGraph) => Box::new(MultipartitePhraseBuilder),
+                    #[cfg(feature = "sentence-rank")]
                     Some(GraphSpec::SentenceGraph { .. }) => Box::new(SentencePhraseBuilder),
                     _ => Box::new(ChunkPhraseBuilder),
                 }
@@ -306,6 +314,7 @@ impl SpecPipelineBuilder {
 
         // ── Format ────────────────────────────────────────────────────
         let formatter: Box<dyn ResultFormatter> = match &modules.format {
+            #[cfg(feature = "sentence-rank")]
             Some(crate::pipeline::spec::FormatSpec::SentenceJson { sort_by_position }) => {
                 Box::new(SentenceFormatter {
                     sort_by_position: sort_by_position.unwrap_or(false),

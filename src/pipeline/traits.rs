@@ -208,9 +208,11 @@ impl CandidateSelector for PhraseCandidateSelector {
 /// lemma IDs are collected per sentence (preserving duplicates for TF).
 ///
 /// This is the selector used by SentenceRank.
+#[cfg(feature = "sentence-rank")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SentenceCandidateSelector;
 
+#[cfg(feature = "sentence-rank")]
 impl CandidateSelector for SentenceCandidateSelector {
     fn select(&self, tokens: TokenStreamRef<'_>, _cfg: &TextRankConfig) -> CandidateSet {
         let num_sentences = tokens.num_sentences();
@@ -1724,12 +1726,14 @@ impl ResultFormatter for StandardResultFormatter {
 ///
 /// When `false` (the default), behaviour is identical to
 /// [`StandardResultFormatter`]: phrases are sorted by score descending.
+#[cfg(feature = "sentence-rank")]
 #[derive(Debug, Clone, Copy)]
 pub struct SentenceFormatter {
     /// If `true`, sort output sentences by document position instead of score.
     pub sort_by_position: bool,
 }
 
+#[cfg(feature = "sentence-rank")]
 impl Default for SentenceFormatter {
     fn default() -> Self {
         Self {
@@ -1738,6 +1742,7 @@ impl Default for SentenceFormatter {
     }
 }
 
+#[cfg(feature = "sentence-rank")]
 impl SentenceFormatter {
     /// Set whether to sort by document position.
     pub fn with_sort_by_position(mut self, sort: bool) -> Self {
@@ -1746,6 +1751,7 @@ impl SentenceFormatter {
     }
 }
 
+#[cfg(feature = "sentence-rank")]
 impl ResultFormatter for SentenceFormatter {
     fn format(
         &self,
@@ -2155,17 +2161,20 @@ impl<C: Clusterer> GraphBuilder for CandidateGraphBuilder<C> {
 ///
 /// - `min_similarity` (default `0.0`): edges with similarity ≤ this threshold
 ///   are omitted.  At the default value any non-zero overlap produces an edge.
+#[cfg(feature = "sentence-rank")]
 #[derive(Debug, Clone, Copy)]
 pub struct SentenceGraphBuilder {
     pub min_similarity: f64,
 }
 
+#[cfg(feature = "sentence-rank")]
 impl Default for SentenceGraphBuilder {
     fn default() -> Self {
         Self { min_similarity: 0.0 }
     }
 }
 
+#[cfg(feature = "sentence-rank")]
 impl SentenceGraphBuilder {
     /// Set the minimum Jaccard similarity for an edge to be created.
     /// Clamped to `[0.0, 1.0]`.
@@ -2175,6 +2184,7 @@ impl SentenceGraphBuilder {
     }
 }
 
+#[cfg(feature = "sentence-rank")]
 impl GraphBuilder for SentenceGraphBuilder {
     fn build(
         &self,
@@ -2502,9 +2512,11 @@ impl PhraseBuilder for MultipartitePhraseBuilder {
 /// 3. Materializes the sentence surface text by joining token texts.
 /// 4. Builds a [`PhraseEntry`] with char-offset spans.
 /// 5. Sorts by score descending and truncates to `cfg.top_n`.
+#[cfg(feature = "sentence-rank")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SentencePhraseBuilder;
 
+#[cfg(feature = "sentence-rank")]
 impl PhraseBuilder for SentencePhraseBuilder {
     fn build(
         &self,
@@ -7474,6 +7486,7 @@ mod tests {
     // ================================================================
 
     /// Helper: build a sentence CandidateSet from raw lemma-ID vectors.
+    #[cfg(feature = "sentence-rank")]
     fn make_sentence_candidates(lemma_vecs: Vec<Vec<u32>>) -> CandidateSet {
         let sentences: Vec<SentenceCandidate> = lemma_vecs
             .into_iter()
@@ -7490,6 +7503,7 @@ mod tests {
         CandidateSet::from_kind(CandidateKind::Sentences(sentences))
     }
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_graph_builder_basic() {
         // 3 sentences with known overlaps:
@@ -7517,6 +7531,7 @@ mod tests {
         assert!((weight_01 - 0.5).abs() < 1e-10, "Expected 0.5, got {weight_01}");
     }
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_graph_builder_threshold() {
         // Same 3 sentences, but min_similarity=0.6 should filter the 0.5-edge.
@@ -7537,6 +7552,7 @@ mod tests {
         assert_eq!(graph.num_edges(), 0);
     }
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_graph_builder_empty() {
         let candidates = make_sentence_candidates(vec![]);
@@ -7549,6 +7565,7 @@ mod tests {
         assert!(graph.is_empty());
     }
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_graph_builder_single() {
         let candidates = make_sentence_candidates(vec![vec![1, 2, 3]]);
@@ -7563,6 +7580,7 @@ mod tests {
         assert_eq!(graph.num_edges(), 0);
     }
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_graph_builder_wrong_kind() {
         // Word candidates → should return empty graph.
@@ -7842,6 +7860,7 @@ mod tests {
 
     // ─── SentenceCandidateSelector tests ────────────────────────────────
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_candidate_selector() {
         let tokens = rich_tokens();
@@ -7875,6 +7894,7 @@ mod tests {
 
     /// Helper: build a sentence-level pipeline through candidates + graph + rank,
     /// then return the artifacts needed for SentencePhraseBuilder.
+    #[cfg(feature = "sentence-rank")]
     fn sentence_pipeline_artifacts(
         tokens: &[Token],
         cfg: &TextRankConfig,
@@ -7886,6 +7906,7 @@ mod tests {
         (stream, candidates, graph, ranks)
     }
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_phrase_builder_basic() {
         let tokens = rich_tokens(); // 2 sentences
@@ -7917,6 +7938,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_phrase_builder_wrong_kind() {
         // Word candidates → SentencePhraseBuilder should return empty.
@@ -7938,6 +7960,7 @@ mod tests {
         assert!(phrases.is_empty(), "should be empty for word candidates");
     }
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_phrase_builder_empty() {
         let cfg = TextRankConfig::default();
@@ -7957,6 +7980,7 @@ mod tests {
         assert!(phrases.is_empty(), "should be empty for no sentences");
     }
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_phrase_builder_top_n() {
         // 3-sentence token set: rich_tokens gives 2, add a third sentence.
@@ -7985,6 +8009,7 @@ mod tests {
     // SentenceFormatter tests
     // ================================================================
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_formatter_by_score() {
         let tokens = rich_tokens();
@@ -8018,6 +8043,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "sentence-rank")]
     #[test]
     fn test_sentence_formatter_by_position() {
         let tokens = rich_tokens();

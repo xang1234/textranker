@@ -8,6 +8,7 @@ use crate::nlp::tokenizer::Tokenizer;
 use crate::phrase::extraction::extract_keyphrases_with_info;
 use crate::pipeline::artifacts::TokenStream;
 use crate::pipeline::observer::NoopObserver;
+#[cfg(feature = "sentence-rank")]
 use crate::pipeline::runner::SentenceRankPipeline;
 use crate::types::{Phrase, PhraseGrouping, ScoreAggregation, TextRankConfig};
 use crate::variants::biased_textrank::BiasedTextRank;
@@ -843,6 +844,7 @@ impl PyMultipartiteRank {
 ///
 /// Ranks whole sentences using TextRank with Jaccard-similarity edges.
 /// Returns the top-N most important sentences as an extractive summary.
+#[cfg(feature = "sentence-rank")]
 #[pyclass(name = "SentenceRank")]
 pub struct PySentenceRank {
     config: TextRankConfig,
@@ -850,6 +852,7 @@ pub struct PySentenceRank {
     thread_pool: Option<Arc<rayon::ThreadPool>>,
 }
 
+#[cfg(feature = "sentence-rank")]
 #[pymethods]
 impl PySentenceRank {
     #[new]

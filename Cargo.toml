@@ -14,8 +14,9 @@ name = "rapid_textrank"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["python"]
+default = ["python", "sentence-rank"]
 python = ["pyo3"]
+sentence-rank = []
 tracing = ["dep:tracing"]
 
 [dependencies]

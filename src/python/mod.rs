@@ -22,6 +22,7 @@ pub fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<native::PySingleRank>()?;
     m.add_class::<native::PyTopicalPageRank>()?;
     m.add_class::<native::PyMultipartiteRank>()?;
+    #[cfg(feature = "sentence-rank")]
     m.add_class::<native::PySentenceRank>()?;
     m.add_function(wrap_pyfunction!(native::get_stopwords, m)?)?;
 
