@@ -654,6 +654,58 @@ result = json.loads(extract_from_json(json.dumps(payload)))
 - **TopicRank** collapses each topic into a single node and ranks topics as a whole, then picks the best representative from each.
 - **MultipartiteRank** keeps every candidate as its own node but removes edges within the same topic. This preserves fine-grained candidate distinctions while still preventing intra-topic competition.
 
+## Modular Pipeline
+
+Under the hood, every variant is a pipeline of eight composable stages:
+
+```
+Tokens ──► Preprocess ──► Candidates ──► Graph ──► Transform ──► Teleport ──► Rank ──► Phrases ──► Format
+                          (what)         (how)     (modify)      (bias)       (PR)     (assemble)   (output)
+```
+
+Each variant is a *parameter choice* — not a separate code path. For example, PositionRank is just the standard pipeline with a position-weighted teleport builder. You can compose your own variant via a JSON pipeline spec:
+
+```python
+import json
+from rapid_textrank import extract_from_json
+
+doc = {
+    "tokens": tokens,  # Pre-tokenized input
+    "pipeline": {
+        "v": 1,
+        "strict": True,
+        "modules": {
+            "candidates": {"type": "word_nodes"},
+            "graph": {"type": "cooccurrence_window", "window_size": 5},
+            "teleport": {"type": "position"},
+            "rank": {"type": "personalized_pagerank"},
+        },
+        "runtime": {
+            "max_threads": 4,
+            "deterministic": True,
+        },
+        "expose": {
+            "graph_stats": True,
+            "stage_timings": True,
+        },
+    },
+}
+
+result = json.loads(extract_from_json(json.dumps(doc)))
+```
+
+The pipeline spec also supports:
+
+- **Presets** — use `"preset": "position_rank"` instead of listing modules manually.
+- **Strict mode** — `"strict": true` rejects typos in field names.
+- **Validate-only** — set `"validate_only": true` to preflight a spec without running extraction.
+- **Capability discovery** — set `"capabilities": true` to query supported modules and presets.
+- **Runtime limits** — `max_tokens`, `max_nodes`, `max_edges` for resource budgeting.
+- **Deterministic output** — `"deterministic": true` for reproducible results across runs.
+- **Debug introspection** — `expose` controls debug output (graph stats, node scores, convergence residuals).
+
+See the [architecture docs](docs/architecture/pipeline.md) for the full stage reference, [composition matrix](docs/architecture/composition-matrix.md) for how variants map to stages, [production hardening](docs/architecture/production-hardening.md) for operational features, and [debug introspection](docs/architecture/debug-introspection.md) for observability.
+
 ## API Reference
 
 ### Convenience Function

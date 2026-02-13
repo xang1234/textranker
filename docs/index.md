@@ -13,7 +13,7 @@ rapid_textrank extracts keywords and key phrases from text up to 10--100x faster
 ## Key Features
 
 - **Fast** -- Rust core with CSR graph format, string interning, and FxHash for 10--100x speedups over pure Python (depending on document size and tokenization).
-- **Seven algorithm variants** -- BaseTextRank, PositionRank, BiasedTextRank, TopicRank, SingleRank, TopicalPageRank, and MultipartiteRank.
+- **Eight algorithm variants** -- BaseTextRank, PositionRank, BiasedTextRank, TopicRank, SingleRank, TopicalPageRank, MultipartiteRank, and SentenceRank.
 - **Unicode-aware** -- proper handling of CJK and other scripts.
 - **18 languages** -- built-in stopword lists from English to Japanese.
 - **Dual API** -- native Python classes for quick use, plus a JSON interface for pre-tokenized / spaCy input.
@@ -61,6 +61,7 @@ systems: 0.0891
 | [Algorithms](algorithms/index.md) | How TextRank works and details on each variant |
 | [API Reference](api/index.md) | `extract_keywords()`, extractor classes, `TextRankConfig`, JSON interface, spaCy integration |
 | [Performance](performance/index.md) | Benchmarks, why Rust is fast, comparison with alternatives |
+| [Architecture](architecture/pipeline.md) | Pipeline stages, variant composition, debug introspection, production hardening |
 
 ---
 
