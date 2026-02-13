@@ -9,20 +9,15 @@ use crate::types::{ChunkSpan, PosTag, Token};
 use rustc_hash::FxHashSet;
 
 /// Linkage strategy for hierarchical agglomerative clustering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Linkage {
     /// Minimum pairwise distance between clusters.
     Single,
     /// Maximum pairwise distance between clusters.
     Complete,
     /// Mean pairwise distance between clusters.
+    #[default]
     Average,
-}
-
-impl Default for Linkage {
-    fn default() -> Self {
-        Linkage::Average
-    }
 }
 
 /// A keyphrase candidate with its term set for clustering

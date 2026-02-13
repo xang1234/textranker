@@ -6,8 +6,8 @@
 
 use crate::pipeline::artifacts::{
     CandidateKind, CandidateSet, CandidateSetRef, ClusterAssignments, DebugPayload,
-    FormattedResult, Graph, PhraseCandidate, PhraseEntry, PhraseSet, RankOutput, SentenceCandidate,
-    TeleportType, TeleportVector, TokenStream, TokenStreamRef, WordCandidate,
+    FormattedResult, Graph, PhraseCandidate, PhraseEntry, PhraseSet, RankOutput, TeleportType,
+    TeleportVector, TokenStream, TokenStreamRef, WordCandidate,
 };
 use crate::types::{ChunkSpan, PosTag, TextRankConfig};
 use serde::{Deserialize, Serialize};
@@ -126,8 +126,8 @@ impl CandidateSelector for WordNodeSelector {
                 (entry.lemma_id, None)
             };
 
-            if !seen.contains_key(&key) {
-                seen.insert(key, words.len());
+            if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(key) {
+                e.insert(words.len());
                 words.push(WordCandidate {
                     lemma_id: entry.lemma_id,
                     pos: entry.pos,
@@ -433,7 +433,7 @@ pub trait GraphBuilder {
 /// `Default` produces the paper-standard configuration: sentence-bounded
 /// windowing with binary edge weights. Note that `base_textrank()` uses
 /// count-accumulating edges to match the library's practical default.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct WindowGraphBuilder {
     /// Windowing behavior (sentence-bounded vs cross-sentence).
     pub window_strategy: WindowStrategy,
@@ -443,15 +443,6 @@ pub struct WindowGraphBuilder {
 
 /// Backward-compatible alias for [`WindowGraphBuilder`].
 pub type CooccurrenceGraphBuilder = WindowGraphBuilder;
-
-impl Default for WindowGraphBuilder {
-    fn default() -> Self {
-        Self {
-            window_strategy: WindowStrategy::default(),
-            edge_weight_policy: EdgeWeightPolicy::default(),
-        }
-    }
-}
 
 impl WindowGraphBuilder {
     /// BaseTextRank configuration: sentence-bounded + count-accumulating.
@@ -546,10 +537,10 @@ impl GraphBuilder for WindowGraphBuilder {
                     let sent_end = i;
 
                     for j in sent_start..sent_end {
-                        let node_j = builder.get_or_create_node(&occurrences[j].1);
+                        let node_j = builder.get_or_create_node(occurrences[j].1);
                         let window_end = std::cmp::min(j + window_size, sent_end);
-                        for k in (j + 1)..window_end {
-                            let node_k = builder.get_or_create_node(&occurrences[k].1);
+                        for occ_k in occurrences.iter().take(window_end).skip(j + 1) {
+                            let node_k = builder.get_or_create_node(occ_k.1);
                             match self.edge_weight_policy {
                                 EdgeWeightPolicy::Binary => {
                                     builder.set_edge(node_j, node_k, 1.0);
@@ -564,10 +555,10 @@ impl GraphBuilder for WindowGraphBuilder {
             }
             WindowStrategy::CrossSentence { .. } => {
                 for j in 0..occurrences.len() {
-                    let node_j = builder.get_or_create_node(&occurrences[j].1);
+                    let node_j = builder.get_or_create_node(occurrences[j].1);
                     let window_end = std::cmp::min(j + window_size, occurrences.len());
-                    for k in (j + 1)..window_end {
-                        let node_k = builder.get_or_create_node(&occurrences[k].1);
+                    for occ_k in occurrences.iter().take(window_end).skip(j + 1) {
+                        let node_k = builder.get_or_create_node(occ_k.1);
                         match self.edge_weight_policy {
                             EdgeWeightPolicy::Binary => {
                                 builder.set_edge(node_j, node_k, 1.0);
@@ -1720,19 +1711,10 @@ impl ResultFormatter for StandardResultFormatter {
 /// When `false` (the default), behaviour is identical to
 /// [`StandardResultFormatter`]: phrases are sorted by score descending.
 #[cfg(feature = "sentence-rank")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct SentenceFormatter {
     /// If `true`, sort output sentences by document position instead of score.
     pub sort_by_position: bool,
-}
-
-#[cfg(feature = "sentence-rank")]
-impl Default for SentenceFormatter {
-    fn default() -> Self {
-        Self {
-            sort_by_position: false,
-        }
-    }
 }
 
 #[cfg(feature = "sentence-rank")]
@@ -2937,7 +2919,7 @@ mod tests {
 
     #[test]
     fn test_noop_preprocessor_default() {
-        let _p = NoopPreprocessor::default();
+        let _p = NoopPreprocessor;
     }
 
     // ================================================================
@@ -2962,8 +2944,10 @@ mod tests {
     fn test_word_selector_custom_include_pos() {
         let tokens = rich_tokens();
         let stream = TokenStream::from_tokens(&tokens);
-        let mut cfg = TextRankConfig::default();
-        cfg.include_pos = vec![PosTag::Noun]; // Only nouns.
+        let cfg = TextRankConfig {
+            include_pos: vec![PosTag::Noun],
+            ..Default::default()
+        }; // Only nouns.
 
         let cs = WordNodeSelector.select(stream.as_ref(), &cfg);
 
@@ -2982,11 +2966,13 @@ mod tests {
             Token::new("fast", "fast", PosTag::Adverb, 5, 9, 0, 1),
         ];
         let stream = TokenStream::from_tokens(&tokens);
-        let mut cfg = TextRankConfig::default();
-        cfg.include_pos = vec![PosTag::Adjective, PosTag::Adverb];
+        let mut cfg = TextRankConfig {
+            include_pos: vec![PosTag::Adjective, PosTag::Adverb],
+            use_pos_in_nodes: true,
+            ..Default::default()
+        };
 
         // With POS: "fast|ADJ" and "fast|ADV" are distinct.
-        cfg.use_pos_in_nodes = true;
         let cs = WordNodeSelector.select(stream.as_ref(), &cfg);
         assert_eq!(cs.len(), 2);
 
@@ -3020,14 +3006,16 @@ mod tests {
     fn test_word_selector_excludes_stopwords() {
         let tokens = rich_tokens();
         let stream = TokenStream::from_tokens(&tokens);
-        let mut cfg = TextRankConfig::default();
         // Include Verb so we can check stopword "is" is still excluded.
-        cfg.include_pos = vec![
-            PosTag::Noun,
-            PosTag::Verb,
-            PosTag::Adjective,
-            PosTag::ProperNoun,
-        ];
+        let cfg = TextRankConfig {
+            include_pos: vec![
+                PosTag::Noun,
+                PosTag::Verb,
+                PosTag::Adjective,
+                PosTag::ProperNoun,
+            ],
+            ..Default::default()
+        };
 
         let cs = WordNodeSelector.select(stream.as_ref(), &cfg);
         let words = cs.words();
@@ -3350,8 +3338,10 @@ mod tests {
         // Sentence-bounded mode should NOT create cross-sentence edges.
         let tokens = rich_tokens();
         let stream = TokenStream::from_tokens(&tokens);
-        let mut cfg = TextRankConfig::default();
-        cfg.window_size = 10; // Large window to stress the boundary.
+        let cfg = TextRankConfig {
+            window_size: 10,
+            ..Default::default()
+        }; // Large window to stress the boundary.
         let cs = word_candidates(&stream, &cfg);
 
         let gb = CooccurrenceGraphBuilder {
@@ -3415,8 +3405,10 @@ mod tests {
             Token::new("learning", "learning", PosTag::Noun, 25, 33, 0, 3),
         ];
         let stream = TokenStream::from_tokens(&tokens);
-        let mut cfg = TextRankConfig::default();
-        cfg.window_size = 2;
+        let cfg = TextRankConfig {
+            window_size: 2,
+            ..Default::default()
+        };
         let cs = word_candidates(&stream, &cfg);
 
         let gb = CooccurrenceGraphBuilder {
@@ -3445,8 +3437,10 @@ mod tests {
             Token::new("learning", "learning", PosTag::Noun, 25, 33, 0, 3),
         ];
         let stream = TokenStream::from_tokens(&tokens);
-        let mut cfg = TextRankConfig::default();
-        cfg.window_size = 2;
+        let cfg = TextRankConfig {
+            window_size: 2,
+            ..Default::default()
+        };
         let cs = word_candidates(&stream, &cfg);
 
         let gb = CooccurrenceGraphBuilder {
@@ -3504,10 +3498,12 @@ mod tests {
             Token::new("run", "run", PosTag::Verb, 10, 13, 0, 2),
         ];
         let stream = TokenStream::from_tokens(&tokens);
-        let mut cfg = TextRankConfig::default();
-        cfg.include_pos = vec![PosTag::Adjective, PosTag::Adverb, PosTag::Verb];
-        cfg.use_pos_in_nodes = true;
-        cfg.window_size = 3;
+        let cfg = TextRankConfig {
+            include_pos: vec![PosTag::Adjective, PosTag::Adverb, PosTag::Verb],
+            use_pos_in_nodes: true,
+            window_size: 3,
+            ..Default::default()
+        };
         let cs = word_candidates(&stream, &cfg);
 
         let gb = CooccurrenceGraphBuilder::default();
@@ -3530,10 +3526,12 @@ mod tests {
             Token::new("run", "run", PosTag::Verb, 10, 13, 0, 2),
         ];
         let stream = TokenStream::from_tokens(&tokens);
-        let mut cfg = TextRankConfig::default();
-        cfg.include_pos = vec![PosTag::Adjective, PosTag::Adverb, PosTag::Verb];
-        cfg.use_pos_in_nodes = false;
-        cfg.window_size = 3;
+        let cfg = TextRankConfig {
+            include_pos: vec![PosTag::Adjective, PosTag::Adverb, PosTag::Verb],
+            use_pos_in_nodes: false,
+            window_size: 3,
+            ..Default::default()
+        };
         let cs = word_candidates(&stream, &cfg);
 
         let gb = CooccurrenceGraphBuilder::default();
@@ -4220,7 +4218,7 @@ mod tests {
 
     #[test]
     fn test_noop_clusterer_default_and_debug() {
-        let _c = NoopClusterer::default();
+        let _c = NoopClusterer;
         let _d = format!("{:?}", NoopClusterer);
     }
 
@@ -4508,8 +4506,8 @@ mod tests {
                 }
                 // Zero out weights for node 0's outgoing edges.
                 let csr = graph.csr_mut();
-                let start = csr.row_ptr[0] as usize;
-                let end = csr.row_ptr[1] as usize;
+                let start = csr.row_ptr[0];
+                let end = csr.row_ptr[1];
                 for i in start..end {
                     csr.weights[i] = 0.0;
                 }
@@ -4645,7 +4643,7 @@ mod tests {
 
     #[test]
     fn test_noop_graph_transform_default() {
-        let _t = NoopGraphTransform::default();
+        let _t = NoopGraphTransform;
     }
 
     // ================================================================
@@ -5138,7 +5136,7 @@ mod tests {
 
     #[test]
     fn test_uniform_teleport_default() {
-        let _tb = UniformTeleportBuilder::default();
+        let _tb = UniformTeleportBuilder;
     }
 
     #[test]
@@ -5247,7 +5245,7 @@ mod tests {
 
     #[test]
     fn test_position_teleport_default() {
-        let _tb = PositionTeleportBuilder::default();
+        let _tb = PositionTeleportBuilder;
     }
 
     // ================================================================
@@ -6043,11 +6041,15 @@ mod tests {
     #[test]
     fn test_pagerank_ranker_respects_damping() {
         let (_stream, _cs, graph) = build_test_graph();
-        let mut cfg_low = TextRankConfig::default();
-        cfg_low.damping = 0.5;
+        let cfg_low = TextRankConfig {
+            damping: 0.5,
+            ..Default::default()
+        };
 
-        let mut cfg_high = TextRankConfig::default();
-        cfg_high.damping = 0.95;
+        let cfg_high = TextRankConfig {
+            damping: 0.95,
+            ..Default::default()
+        };
 
         let output_low = PageRankRanker.rank(&graph, None, &cfg_low);
         let output_high = PageRankRanker.rank(&graph, None, &cfg_high);
@@ -6094,9 +6096,11 @@ mod tests {
         }
         let graph = Graph::from_builder(&builder);
 
-        let mut cfg = TextRankConfig::default();
-        cfg.max_iterations = 2;
-        cfg.convergence_threshold = 1e-15; // Practically unreachable in 2 iters.
+        let cfg = TextRankConfig {
+            max_iterations: 2,
+            convergence_threshold: 1e-15, // Practically unreachable in 2 iters.
+            ..Default::default()
+        };
 
         let output = PageRankRanker.rank(&graph, None, &cfg);
 
@@ -6169,7 +6173,7 @@ mod tests {
 
     #[test]
     fn test_pagerank_ranker_default() {
-        let _r = PageRankRanker::default();
+        let _r = PageRankRanker;
     }
 
     #[test]
@@ -6273,8 +6277,10 @@ mod tests {
     fn test_chunk_phrase_builder_respects_top_n() {
         let tokens = phrase_test_tokens();
         let (stream, cs, graph, ranks) = build_full_pipeline(&tokens);
-        let mut cfg = TextRankConfig::default();
-        cfg.top_n = 1;
+        let cfg = TextRankConfig {
+            top_n: 1,
+            ..Default::default()
+        };
 
         let phrases = ChunkPhraseBuilder.build(stream.as_ref(), cs.as_ref(), &ranks, &graph, &cfg);
 
@@ -6335,8 +6341,10 @@ mod tests {
     fn test_chunk_phrase_builder_sorted_by_score() {
         let tokens = phrase_test_tokens();
         let (stream, cs, graph, ranks) = build_full_pipeline(&tokens);
-        let mut cfg = TextRankConfig::default();
-        cfg.top_n = 20; // Don't limit.
+        let cfg = TextRankConfig {
+            top_n: 20,
+            ..Default::default()
+        }; // Don't limit.
 
         let phrases = ChunkPhraseBuilder.build(stream.as_ref(), cs.as_ref(), &ranks, &graph, &cfg);
 
@@ -6382,8 +6390,10 @@ mod tests {
     fn test_chunk_phrase_builder_min_phrase_length() {
         let tokens = phrase_test_tokens();
         let (stream, cs, graph, ranks) = build_full_pipeline(&tokens);
-        let mut cfg = TextRankConfig::default();
-        cfg.min_phrase_length = 2; // Only multi-word phrases.
+        let cfg = TextRankConfig {
+            min_phrase_length: 2,
+            ..Default::default()
+        }; // Only multi-word phrases.
 
         let phrases = ChunkPhraseBuilder.build(stream.as_ref(), cs.as_ref(), &ranks, &graph, &cfg);
 
@@ -6401,8 +6411,10 @@ mod tests {
     fn test_chunk_phrase_builder_max_phrase_length() {
         let tokens = phrase_test_tokens();
         let (stream, cs, graph, ranks) = build_full_pipeline(&tokens);
-        let mut cfg = TextRankConfig::default();
-        cfg.max_phrase_length = 1; // Only single-word phrases.
+        let cfg = TextRankConfig {
+            max_phrase_length: 1,
+            ..Default::default()
+        }; // Only single-word phrases.
 
         let phrases = ChunkPhraseBuilder.build(stream.as_ref(), cs.as_ref(), &ranks, &graph, &cfg);
 
@@ -6448,7 +6460,7 @@ mod tests {
 
     #[test]
     fn test_chunk_phrase_builder_default() {
-        let _pb = ChunkPhraseBuilder::default();
+        let _pb = ChunkPhraseBuilder;
     }
 
     #[test]
@@ -6845,8 +6857,10 @@ mod tests {
             delta: 1e-7,
             converged: true,
         });
-        let mut cfg = TextRankConfig::default();
-        cfg.determinism = DeterminismMode::Deterministic;
+        let cfg = TextRankConfig {
+            determinism: DeterminismMode::Deterministic,
+            ..Default::default()
+        };
 
         let result = StandardResultFormatter.format(&phrases, &ranks, None, &cfg);
 
@@ -6889,8 +6903,10 @@ mod tests {
             delta: 1e-7,
             converged: true,
         });
-        let mut cfg = TextRankConfig::default();
-        cfg.determinism = DeterminismMode::Deterministic;
+        let cfg = TextRankConfig {
+            determinism: DeterminismMode::Deterministic,
+            ..Default::default()
+        };
 
         let result = StandardResultFormatter.format(&phrases, &ranks, None, &cfg);
 
@@ -6933,8 +6949,10 @@ mod tests {
             delta: 1e-7,
             converged: true,
         });
-        let mut cfg = TextRankConfig::default();
-        cfg.determinism = DeterminismMode::Deterministic;
+        let cfg = TextRankConfig {
+            determinism: DeterminismMode::Deterministic,
+            ..Default::default()
+        };
 
         let result = StandardResultFormatter.format(&phrases, &ranks, None, &cfg);
 
@@ -6984,8 +7002,10 @@ mod tests {
             delta: 1e-7,
             converged: true,
         });
-        let mut cfg = TextRankConfig::default();
-        cfg.determinism = DeterminismMode::Deterministic;
+        let cfg = TextRankConfig {
+            determinism: DeterminismMode::Deterministic,
+            ..Default::default()
+        };
 
         let r1 = StandardResultFormatter.format(&phrases, &ranks, None, &cfg);
         let r2 = StandardResultFormatter.format(&phrases, &ranks, None, &cfg);
@@ -7594,10 +7614,10 @@ mod tests {
     /// Helper: build a sentence CandidateSet from raw lemma-ID vectors.
     #[cfg(feature = "sentence-rank")]
     fn make_sentence_candidates(lemma_vecs: Vec<Vec<u32>>) -> CandidateSet {
-        let sentences: Vec<SentenceCandidate> = lemma_vecs
+        let sentences: Vec<crate::pipeline::artifacts::SentenceCandidate> = lemma_vecs
             .into_iter()
             .enumerate()
-            .map(|(i, ids)| SentenceCandidate {
+            .map(|(i, ids)| crate::pipeline::artifacts::SentenceCandidate {
                 sentence_idx: i as u32,
                 start_token: (i * 10) as u32,
                 end_token: (i * 10 + 5) as u32,

@@ -523,8 +523,8 @@ impl CandidateSet {
                 (entry.lemma_id, None)
             };
 
-            if !seen.contains_key(&key) {
-                seen.insert(key, words.len());
+            if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(key) {
+                e.insert(words.len());
                 words.push(WordCandidate {
                     lemma_id: entry.lemma_id,
                     pos: entry.pos,
@@ -1648,7 +1648,7 @@ impl DebugLevel {
     }
 
     /// Parse from a string (case-insensitive).
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "none" => Some(DebugLevel::None),
             "stats" => Some(DebugLevel::Stats),
@@ -3244,23 +3244,26 @@ mod tests {
 
     #[test]
     fn test_debug_level_from_str() {
-        assert_eq!(DebugLevel::from_str("none"), Some(DebugLevel::None));
-        assert_eq!(DebugLevel::from_str("stats"), Some(DebugLevel::Stats));
+        assert_eq!(DebugLevel::parse_str("none"), Some(DebugLevel::None));
+        assert_eq!(DebugLevel::parse_str("stats"), Some(DebugLevel::Stats));
         assert_eq!(
-            DebugLevel::from_str("top_nodes"),
+            DebugLevel::parse_str("top_nodes"),
             Some(DebugLevel::TopNodes)
         );
-        assert_eq!(DebugLevel::from_str("topnodes"), Some(DebugLevel::TopNodes));
-        assert_eq!(DebugLevel::from_str("full"), Some(DebugLevel::Full));
-        // Case-insensitive.
-        assert_eq!(DebugLevel::from_str("STATS"), Some(DebugLevel::Stats));
         assert_eq!(
-            DebugLevel::from_str("Top_Nodes"),
+            DebugLevel::parse_str("topnodes"),
+            Some(DebugLevel::TopNodes)
+        );
+        assert_eq!(DebugLevel::parse_str("full"), Some(DebugLevel::Full));
+        // Case-insensitive.
+        assert_eq!(DebugLevel::parse_str("STATS"), Some(DebugLevel::Stats));
+        assert_eq!(
+            DebugLevel::parse_str("Top_Nodes"),
             Some(DebugLevel::TopNodes)
         );
         // Unknown.
-        assert_eq!(DebugLevel::from_str("verbose"), None);
-        assert_eq!(DebugLevel::from_str(""), None);
+        assert_eq!(DebugLevel::parse_str("verbose"), None);
+        assert_eq!(DebugLevel::parse_str(""), None);
     }
 
     #[test]

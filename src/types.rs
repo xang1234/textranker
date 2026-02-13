@@ -946,7 +946,7 @@ mod tests {
     fn test_stable_cmp_sort_integration() {
         // Verify that sorting a Vec<Phrase> with stable_cmp produces a
         // deterministic order matching all tie-breaker rules.
-        let mut phrases = vec![
+        let mut phrases = [
             phrase("delta", 0.3, vec![(10, 12)]),
             phrase("alpha", 0.5, vec![(0, 1)]),
             phrase("gamma", 0.5, vec![(0, 3)]), // same pos as alpha, longer

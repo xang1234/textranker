@@ -17,7 +17,7 @@
 //! Use [`Pipeline::base_textrank()`] (and friends) to build pipelines for
 //! known algorithm variants without spelling out the generics manually.
 
-use crate::pipeline::artifacts::{DebugLevel, FormattedResult, PipelineWorkspace, TokenStream};
+use crate::pipeline::artifacts::{FormattedResult, PipelineWorkspace, TokenStream};
 use crate::pipeline::error_code::ErrorCode;
 use crate::pipeline::errors::PipelineRuntimeError;
 use crate::pipeline::observer::{
@@ -905,7 +905,7 @@ impl<Pre, Sel, GB, GT, TB, Rnk, PB, Fmt> PipelineBuilder<Pre, Sel, GB, GT, TB, R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::artifacts::{CandidateSet, Graph, PhraseSet, RankOutput};
+    use crate::pipeline::artifacts::{CandidateSet, DebugLevel, Graph, PhraseSet, RankOutput};
     use crate::pipeline::observer::{NoopObserver, StageTimingObserver};
     use crate::types::{PosTag, Token};
 
@@ -1828,8 +1828,10 @@ mod tests {
         let pipeline = super::TopicalPageRankPipeline::topical(weights, 0.1);
 
         // Low damping — teleport dominates.
-        let mut cfg_low = TextRankConfig::default();
-        cfg_low.damping = 0.5;
+        let cfg_low = TextRankConfig {
+            damping: 0.5,
+            ..Default::default()
+        };
         let result_low = {
             let stream = TokenStream::from_tokens(&tokens);
             let mut obs = NoopObserver;
@@ -1837,8 +1839,10 @@ mod tests {
         };
 
         // High damping — link structure dominates.
-        let mut cfg_high = TextRankConfig::default();
-        cfg_high.damping = 0.99;
+        let cfg_high = TextRankConfig {
+            damping: 0.99,
+            ..Default::default()
+        };
         let result_high = {
             let stream = TokenStream::from_tokens(&tokens);
             let mut obs = NoopObserver;
@@ -2449,13 +2453,13 @@ mod tests {
         assert_eq!(scores.len(), num_content_tokens);
 
         // Now test with an explicit small top_k via DebugPayload::build directly.
-        let stream2 = TokenStream::from_tokens(&sample_tokens());
-        let cfg2 = TextRankConfig::default();
+        let _stream2 = TokenStream::from_tokens(&sample_tokens());
+        let _cfg2 = TextRankConfig::default();
         // Build a pipeline and manually call build with top_k=2.
         // We need access to graph and ranks, so we run the pipeline first
         // at None level, then build the debug payload separately.
         // Instead, let's just test DebugPayload::build directly.
-        use crate::pipeline::artifacts::DebugPayload;
+
         // We already tested this in artifacts tests, but verify via integration:
         // Run the pipeline to get a FormattedResult, then verify the scores length
         // from the default run (which uses DEFAULT_TOP_K = 50) is bounded.

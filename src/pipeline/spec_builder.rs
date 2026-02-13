@@ -173,7 +173,7 @@ impl SpecPipelineBuilder {
         };
 
         // ── Clustering (resolved early — graph builders may need it) ──
-        let clustering_spec = modules.clustering.clone().or_else(|| {
+        let clustering_spec = modules.clustering.clone().or({
             // Auto-infer clustering for topic-family graphs.
             match &modules.graph {
                 Some(GraphSpec::TopicGraph) | Some(GraphSpec::CandidateGraph) => {
@@ -846,7 +846,7 @@ mod tests {
     fn test_build_from_spec_v1_with_preset_and_overrides() {
         // Start from single_rank preset (cross-sentence graph),
         // override window_size to 5.
-        let spec = PipelineSpec::V1(PipelineSpecV1 {
+        let spec = PipelineSpec::V1(Box::new(PipelineSpecV1 {
             v: 1,
             preset: Some("single_rank".into()),
             modules: ModuleSet {
@@ -861,7 +861,7 @@ mod tests {
             expose: None,
             strict: false,
             unknown_fields: HashMap::new(),
-        });
+        }));
         let cfg = deterministic_config();
         let pipeline = SpecPipelineBuilder::new()
             .build_from_spec(&spec, &cfg)
@@ -875,7 +875,7 @@ mod tests {
     #[test]
     fn test_build_from_spec_v1_without_preset() {
         // V1 without preset — modules used directly.
-        let spec = PipelineSpec::V1(minimal_spec());
+        let spec = PipelineSpec::V1(Box::new(minimal_spec()));
         let cfg = deterministic_config();
         let pipeline = SpecPipelineBuilder::new()
             .build_from_spec(&spec, &cfg)
@@ -901,7 +901,7 @@ mod tests {
     #[test]
     fn test_build_from_spec_validation_catches_invalid_combo() {
         // personalized_pagerank without teleport → validation error.
-        let spec = PipelineSpec::V1(PipelineSpecV1 {
+        let spec = PipelineSpec::V1(Box::new(PipelineSpecV1 {
             v: 1,
             preset: None,
             modules: ModuleSet {
@@ -916,7 +916,7 @@ mod tests {
             expose: None,
             strict: false,
             unknown_fields: HashMap::new(),
-        });
+        }));
         let cfg = TextRankConfig::default();
         let err = match SpecPipelineBuilder::new().build_from_spec(&spec, &cfg) {
             Err(e) => e,

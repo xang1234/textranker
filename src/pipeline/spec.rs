@@ -45,14 +45,14 @@ pub enum PipelineSpec {
     /// A preset name resolved at execution time.
     Preset(String),
     /// A full V1 specification with explicit module selections.
-    V1(PipelineSpecV1),
+    V1(Box<PipelineSpecV1>),
 }
 
 impl PipelineSpec {
     /// Returns a reference to the inner `PipelineSpecV1` if this is a `V1` variant.
     pub fn as_v1(&self) -> Option<&PipelineSpecV1> {
         match self {
-            PipelineSpec::V1(v1) => Some(v1),
+            PipelineSpec::V1(v1) => Some(v1.as_ref()),
             _ => None,
         }
     }
@@ -60,7 +60,7 @@ impl PipelineSpec {
     /// Consumes `self` and returns the inner `PipelineSpecV1` if this is a `V1` variant.
     pub fn into_v1(self) -> Option<PipelineSpecV1> {
         match self {
-            PipelineSpec::V1(v1) => Some(v1),
+            PipelineSpec::V1(v1) => Some(*v1),
             _ => None,
         }
     }
@@ -311,7 +311,7 @@ pub fn resolve_spec(spec: &PipelineSpec) -> Result<PipelineSpecV1, PipelineSpecE
                     unknown_fields: v1.unknown_fields.clone(),
                 })
             } else {
-                Ok(v1.clone())
+                Ok(v1.as_ref().clone())
             }
         }
     }
@@ -477,7 +477,7 @@ impl GraphSpec {
             ) => Self::CooccurrenceWindow {
                 window_size: window_size.or(*fb_ws),
                 cross_sentence: cross_sentence.or(*fb_cs),
-                edge_weighting: edge_weighting.clone().or(fb_ew.clone()),
+                edge_weighting: (*edge_weighting).or(*fb_ew),
             },
             #[cfg(feature = "sentence-rank")]
             (
@@ -693,6 +693,7 @@ impl PhraseSpec {
                 phrase_grouping: phrase_grouping.or(*fb_pg),
             },
             // Different variants or SentencePhrases — no deep merge needed.
+            #[cfg(feature = "sentence-rank")]
             _ => self.clone(),
         }
     }
@@ -1234,7 +1235,7 @@ mod tests {
             max_threads: Some(2),
             ..Default::default()
         };
-        let thread_count = rt.scoped(|| rayon::current_num_threads());
+        let thread_count = rt.scoped(rayon::current_num_threads);
         assert_eq!(thread_count, 2);
     }
 
@@ -2174,7 +2175,7 @@ mod tests {
     fn test_resolve_spec_v1_with_preset_merges_modules() {
         // Start from single_rank preset (cross-sentence graph),
         // override with position teleport.
-        let spec = PipelineSpec::V1(PipelineSpecV1 {
+        let spec = PipelineSpec::V1(Box::new(PipelineSpecV1 {
             v: 1,
             preset: Some("single_rank".into()),
             modules: ModuleSet {
@@ -2185,7 +2186,7 @@ mod tests {
             expose: None,
             strict: false,
             unknown_fields: HashMap::new(),
-        });
+        }));
         let v1 = resolve_spec(&spec).unwrap();
         // Teleport comes from user override
         assert!(matches!(
@@ -2215,7 +2216,7 @@ mod tests {
             strict: true,
             unknown_fields: HashMap::new(),
         };
-        let spec = PipelineSpec::V1(original.clone());
+        let spec = PipelineSpec::V1(Box::new(original.clone()));
         let v1 = resolve_spec(&spec).unwrap();
         assert!(v1.preset.is_none());
         assert!(matches!(
@@ -2235,7 +2236,7 @@ mod tests {
 
     #[test]
     fn test_resolve_spec_v1_invalid_preset() {
-        let spec = PipelineSpec::V1(PipelineSpecV1 {
+        let spec = PipelineSpec::V1(Box::new(PipelineSpecV1 {
             v: 1,
             preset: Some("bogus".into()),
             modules: Default::default(),
@@ -2243,14 +2244,14 @@ mod tests {
             expose: None,
             strict: false,
             unknown_fields: HashMap::new(),
-        });
+        }));
         let err = resolve_spec(&spec).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidValue);
     }
 
     #[test]
     fn test_resolve_spec_preserves_runtime_and_expose() {
-        let spec = PipelineSpec::V1(PipelineSpecV1 {
+        let spec = PipelineSpec::V1(Box::new(PipelineSpecV1 {
             v: 1,
             preset: Some("textrank".into()),
             modules: Default::default(),
@@ -2265,7 +2266,7 @@ mod tests {
             }),
             strict: true,
             unknown_fields: HashMap::new(),
-        });
+        }));
         let v1 = resolve_spec(&spec).unwrap();
         assert_eq!(v1.runtime.max_tokens, Some(50000));
         assert_eq!(v1.runtime.deterministic, Some(true));
@@ -2278,7 +2279,7 @@ mod tests {
         // Preset: single_rank → graph with cross_sentence=true
         // User: graph with window_size=5 (but no cross_sentence)
         // Result: window_size=5 + cross_sentence=true (deep merge)
-        let spec = PipelineSpec::V1(PipelineSpecV1 {
+        let spec = PipelineSpec::V1(Box::new(PipelineSpecV1 {
             v: 1,
             preset: Some("single_rank".into()),
             modules: ModuleSet {
@@ -2293,7 +2294,7 @@ mod tests {
             expose: None,
             strict: false,
             unknown_fields: HashMap::new(),
-        });
+        }));
         let v1 = resolve_spec(&spec).unwrap();
         match &v1.modules.graph {
             Some(GraphSpec::CooccurrenceWindow {

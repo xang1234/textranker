@@ -611,7 +611,7 @@ fn run_pipeline_from_spec(
         .build(&resolved, config)
         .map_err(|e| DocError::Other(e.to_string()))?;
 
-    let use_timings = resolved.expose.as_ref().map_or(false, |e| e.stage_timings);
+    let use_timings = resolved.expose.as_ref().is_some_and(|e| e.stage_timings);
     let format_spec = resolved.modules.format.as_ref();
 
     // 5+6. Run pipeline (conditional observer + scoped threading)
@@ -1796,7 +1796,7 @@ mod tests {
     #[test]
     fn test_validate_only_v1_with_preset_resolves_before_validation() {
         // V1 spec with a preset field should merge then validate
-        let spec = PipelineSpec::V1(PipelineSpecV1 {
+        let spec = PipelineSpec::V1(Box::new(PipelineSpecV1 {
             v: 1,
             preset: Some("position_rank".into()),
             modules: crate::pipeline::spec::ModuleSet::default(),
@@ -1804,7 +1804,7 @@ mod tests {
             expose: None,
             strict: false,
             unknown_fields: std::collections::HashMap::new(),
-        });
+        }));
         let resolved = resolve_spec(&spec).unwrap();
         let resp = validate_spec_impl(&resolved);
         assert!(resp.valid);
@@ -2043,7 +2043,7 @@ mod tests {
 
         // Start from single_rank preset (cross_sentence=true, no window_size)
         // Override with window_size=5
-        let spec = PipelineSpec::V1(PipelineSpecV1 {
+        let spec = PipelineSpec::V1(Box::new(PipelineSpecV1 {
             v: 1,
             preset: Some("single_rank".into()),
             modules: ModuleSet {
@@ -2058,7 +2058,7 @@ mod tests {
             expose: None,
             strict: false,
             unknown_fields: std::collections::HashMap::new(),
-        });
+        }));
 
         let resolved = resolve_spec(&spec).unwrap();
 
