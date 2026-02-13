@@ -10,6 +10,8 @@
 use crate::types::{PosTag, StringPool, Token};
 use serde::{Deserialize, Serialize};
 
+use super::errors::PipelineRuntimeError;
+
 // ============================================================================
 // TokenStream — interned, compact token representation
 // ============================================================================
@@ -1560,9 +1562,9 @@ pub struct FormattedResult {
     pub iterations: u32,
     /// Optional debug payload (opt-in via `expose` config).
     pub debug: Option<DebugPayload>,
-    /// Optional error message (e.g., graph limit exceeded).
+    /// Optional structured error (e.g., graph limit exceeded).
     /// When set, `phrases` is empty and the caller should surface the error.
-    pub error: Option<String>,
+    pub error: Option<PipelineRuntimeError>,
 }
 
 // ============================================================================

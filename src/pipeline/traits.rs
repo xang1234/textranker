@@ -346,7 +346,8 @@ pub enum EdgeWeightPolicy {
 }
 
 impl Default for EdgeWeightPolicy {
-    /// Binary is the default (BaseTextRank behavior).
+    /// Binary is the `Default` trait implementation. Note: `base_textrank()`
+    /// uses `CountAccumulating` — the library's practical default.
     fn default() -> Self {
         Self::Binary
     }
@@ -374,8 +375,8 @@ impl EdgeWeightPolicy {
 ///
 /// - **Window strategy**: sentence-bounded (BaseTextRank) vs cross-sentence
 ///   (SingleRank / TopicalPageRank) — see [`WindowStrategy`].
-/// - **Edge weight policy**: binary (BaseTextRank) vs count-accumulating
-///   (SingleRank) — see [`EdgeWeightPolicy`].
+/// - **Edge weight policy**: count-accumulating (`base_textrank()` default)
+///   vs binary (paper-standard) — see [`EdgeWeightPolicy`].
 ///
 /// The provided [`WindowGraphBuilder`] covers both families via
 /// configuration. Custom implementations can override this trait for entirely
@@ -424,13 +425,14 @@ pub trait GraphBuilder {
 ///
 /// # Presets
 ///
-/// - [`WindowGraphBuilder::base_textrank()`] — sentence-bounded + binary
+/// - [`WindowGraphBuilder::base_textrank()`] — sentence-bounded + count-accumulating
 /// - [`WindowGraphBuilder::single_rank()`] — cross-sentence + count-accumulating
 ///
 /// # Default
 ///
-/// `Default` produces the BaseTextRank configuration: sentence-bounded
-/// windowing with binary edge weights.
+/// `Default` produces the paper-standard configuration: sentence-bounded
+/// windowing with binary edge weights. Note that `base_textrank()` uses
+/// count-accumulating edges to match the library's practical default.
 #[derive(Debug, Clone, Copy)]
 pub struct WindowGraphBuilder {
     /// Windowing behavior (sentence-bounded vs cross-sentence).
@@ -8176,5 +8178,29 @@ mod tests {
         for (i, p) in result.phrases.iter().enumerate() {
             assert_eq!(p.rank, i + 1);
         }
+    }
+
+    // ─── Defaults-locking tests ─────────────────────────────────────
+
+    #[test]
+    fn test_base_textrank_uses_count_accumulating() {
+        let builder = WindowGraphBuilder::base_textrank();
+        assert!(
+            builder.edge_weight_policy.is_count_accumulating(),
+            "base_textrank() must use CountAccumulating edges"
+        );
+        assert!(matches!(
+            builder.window_strategy,
+            WindowStrategy::SentenceBounded { .. }
+        ));
+    }
+
+    #[test]
+    fn test_edge_weight_policy_default_is_binary() {
+        let policy = EdgeWeightPolicy::default();
+        assert!(
+            policy.is_binary(),
+            "EdgeWeightPolicy::default() must be Binary (paper-standard)"
+        );
     }
 }

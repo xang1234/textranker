@@ -213,6 +213,8 @@ impl SpecPipelineBuilder {
                 } else {
                     WindowStrategy::SentenceBounded { window_size: ws }
                 };
+                // Default to CountAccumulating (not Binary) to match
+                // base_textrank() and the library's practical default.
                 let policy = match edge_weighting {
                     Some(EdgeWeightingSpec::Binary) => EdgeWeightPolicy::Binary,
                     Some(EdgeWeightingSpec::Count) | None => EdgeWeightPolicy::CountAccumulating,

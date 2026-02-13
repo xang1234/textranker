@@ -15,7 +15,7 @@ Extract keywords and key phrases from text up to 10-100x faster than pure Python
 - **Unicode-aware**: Proper handling of CJK and other scripts (emoji are ignored by the built-in tokenizer)
 - **Multi-language**: Stopword support for 18 languages
 - **Dual API**: Native Python classes + JSON interface for batch processing
-- **Rust core**: Computation happens in Rust (the Python GIL is currently held during extraction)
+- **Rust core**: Computation happens in Rust (the Python GIL is released during extraction)
 
 ## Quick Start
 
@@ -705,6 +705,86 @@ The pipeline spec also supports:
 - **Debug introspection** — `expose` controls debug output (graph stats, node scores, convergence residuals).
 
 See the [architecture docs](docs/architecture/pipeline.md) for the full stage reference, [composition matrix](docs/architecture/composition-matrix.md) for how variants map to stages, [production hardening](docs/architecture/production-hardening.md) for operational features, and [debug introspection](docs/architecture/debug-introspection.md) for observability.
+
+### PipelineSpec (Advanced)
+
+The `pipeline` field accepts either a preset string or a full v1 spec object:
+
+```python
+# Preset string — shorthand for a named variant
+doc = {"tokens": tokens, "pipeline": "position_rank"}
+
+# V1 spec object — full control over every stage
+doc = {
+    "tokens": tokens,
+    "pipeline": {
+        "v": 1,
+        "preset": "textrank",       # optional base; module overrides take precedence
+        "strict": True,             # reject unknown field names
+        "modules": {
+            "graph": {"type": "cooccurrence_window", "window_size": 5,
+                      "edge_weighting": "count"},
+            "teleport": {"type": "position"},
+        },
+        "runtime": {
+            "deterministic": True,
+            "max_tokens": 50000,
+            "max_nodes": 10000,
+            "max_edges": 100000,
+        },
+    },
+}
+```
+
+**Precedence**: explicit `modules` fields override `preset` defaults. `pipeline` takes precedence over `variant`.
+
+Set `"validate_only": true` (top-level) to preflight a spec without running extraction. Set `"capabilities": true` to query supported modules and presets.
+
+### Debug and Introspection
+
+The `expose` section in a pipeline spec controls what debug information appears in the output:
+
+```python
+doc = {
+    "tokens": tokens,
+    "pipeline": {
+        "v": 1,
+        "modules": {},
+        "expose": {
+            "graph_stats": True,          # node/edge counts, density
+            "node_scores": {"top_k": 10}, # top-k PageRank scores
+            "stage_timings": True,        # per-stage wall-clock durations
+        },
+    },
+}
+```
+
+The result includes a `"debug"` key with the requested data. Use `runtime.max_debug_top_k` to cap the number of node scores returned (default: 100).
+
+Format types: the default format is `standard_json_with_debug`, which nests debug output under `"debug"`. Use `modules.format` to customize the debug key name.
+
+### Runtime Errors
+
+Pipeline-path errors are returned as structured objects:
+
+```json
+{
+  "error": {
+    "code": "limit_exceeded",
+    "path": "/runtime/max_tokens",
+    "stage": "preprocess",
+    "message": "token count 5000 exceeds runtime limit of 1000",
+    "hint": "Increase runtime.max_tokens or reduce input size"
+  },
+  "error_message": "[limit_exceeded] /runtime/max_tokens (stage: preprocess): token count 5000 exceeds runtime limit of 1000"
+}
+```
+
+Error codes: `limit_exceeded`, `missing_stage`, `invalid_combo`, `invalid_value`, `unknown_field`, `stage_failed`, `convergence_failed`.
+
+The `error_message` field provides a flat string for backward compatibility. Legacy (non-pipeline) errors continue to use `{"error": "plain string"}`.
+
+All batch modes (`extract_batch_from_json`, `extract_jsonl_from_json`, `extract_batch_iter`) support pipeline specs, workspace reuse for PageRank buffer recycling, and per-document structured error handling.
 
 ## API Reference
 

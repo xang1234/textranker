@@ -18,6 +18,8 @@
 //! known algorithm variants without spelling out the generics manually.
 
 use crate::pipeline::artifacts::{DebugLevel, FormattedResult, PipelineWorkspace, TokenStream};
+use crate::pipeline::error_code::ErrorCode;
+use crate::pipeline::errors::PipelineRuntimeError;
 use crate::pipeline::observer::{
     PipelineObserver, StageClock, StageReport, StageReportBuilder, STAGE_CANDIDATES, STAGE_FORMAT,
     STAGE_GRAPH, STAGE_GRAPH_TRANSFORM, STAGE_PHRASES, STAGE_PREPROCESS, STAGE_RANK,
@@ -104,7 +106,7 @@ impl BaseTextRankPipeline {
     /// All stages use their zero-sized defaults:
     /// - No preprocessing
     /// - Word-level candidate selection (POS + stopword filtering)
-    /// - Sentence-bounded co-occurrence graph (binary edges)
+    /// - Sentence-bounded co-occurrence graph (count-accumulating edges)
     /// - No graph transform
     /// - Uniform teleport (standard PageRank)
     /// - PageRank ranker
@@ -624,20 +626,30 @@ where
         observer.on_phrases(&phrases);
 
         // Check graph size limits (pipeline runtime safety bounds).
+        //
+        // These checks run *after* graph construction because we need the
+        // actual node/edge counts. The cost is bounded: the graph is already
+        // built but we short-circuit before the expensive PageRank iteration.
         if let Some(max) = cfg.max_nodes {
             if graph.num_nodes() > max {
-                // Return an empty result with an error signal rather than panicking.
-                // Callers in the JSON layer will convert this to an error string.
                 return FormattedResult {
                     phrases: Vec::new(),
                     converged: false,
                     iterations: 0,
                     debug: None,
-                    error: Some(format!(
-                        "graph node count {} exceeds runtime limit of {}",
-                        graph.num_nodes(),
-                        max
-                    )),
+                    error: Some(
+                        PipelineRuntimeError::new(
+                            ErrorCode::LimitExceeded,
+                            "/runtime/max_nodes",
+                            "graph",
+                            format!(
+                                "graph node count {} exceeds runtime limit of {}",
+                                graph.num_nodes(),
+                                max
+                            ),
+                        )
+                        .with_hint("Increase runtime.max_nodes or reduce input complexity"),
+                    ),
                 };
             }
         }
@@ -648,11 +660,19 @@ where
                     converged: false,
                     iterations: 0,
                     debug: None,
-                    error: Some(format!(
-                        "graph edge count {} exceeds runtime limit of {}",
-                        graph.num_edges(),
-                        max
-                    )),
+                    error: Some(
+                        PipelineRuntimeError::new(
+                            ErrorCode::LimitExceeded,
+                            "/runtime/max_edges",
+                            "graph",
+                            format!(
+                                "graph edge count {} exceeds runtime limit of {}",
+                                graph.num_edges(),
+                                max
+                            ),
+                        )
+                        .with_hint("Increase runtime.max_edges or reduce input complexity"),
+                    ),
                 };
             }
         }

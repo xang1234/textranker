@@ -6,6 +6,8 @@
 use crate::phrase::chunker::NounChunker;
 use crate::phrase::extraction::extract_keyphrases_with_info;
 use crate::pipeline::artifacts::{DebugPayload, FormattedResult, PipelineWorkspace, TokenStream};
+use crate::pipeline::error_code::ErrorCode;
+use crate::pipeline::errors::PipelineRuntimeError;
 use crate::pipeline::observer::{NoopObserver, StageTimingObserver};
 #[cfg(feature = "sentence-rank")]
 use crate::pipeline::runner::SentenceRankPipeline;
@@ -23,6 +25,50 @@ use crate::variants::Variant;
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+// ─── DocError ─────────────────────────────────────────────────────────────────
+//
+// Bridges two error worlds: structured `PipelineRuntimeError` (pipeline path)
+// and plain `String` (legacy variant path). Callers serialize via
+// `serialize_doc_error` so pipeline consumers get rich `{code, path, stage,
+// message, hint}` objects while legacy consumers get backward-compatible strings.
+
+/// Document-level processing error.
+#[derive(Debug)]
+enum DocError {
+    /// Structured error from the modular pipeline path.
+    Pipeline(PipelineRuntimeError),
+    /// Plain-text error from legacy variant dispatch or non-pipeline code.
+    Other(String),
+}
+
+impl std::fmt::Display for DocError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DocError::Pipeline(e) => write!(f, "{e}"),
+            DocError::Other(s) => f.write_str(s),
+        }
+    }
+}
+
+/// Serialize a `DocError` into an inline JSON error object.
+///
+/// - **Pipeline errors** → `{"error": {code, path, stage, message, hint?}, "error_message": "..."}`
+/// - **Other errors** → `{"error": "plain string"}`
+fn serialize_doc_error(err: &DocError) -> String {
+    match err {
+        DocError::Pipeline(e) => {
+            let obj = serde_json::json!({
+                "error": e,
+                "error_message": e.to_string(),
+            });
+            serde_json::to_string(&obj).unwrap()
+        }
+        DocError::Other(s) => {
+            serde_json::to_string(&serde_json::json!({ "error": s })).unwrap()
+        }
+    }
+}
 
 /// Input token from JSON
 #[derive(Debug, Clone, Deserialize)]
@@ -438,21 +484,21 @@ fn attach_stage_timings(
 }
 
 /// Serialize a `JsonResult` respecting the `FormatSpec` (e.g., custom debug key).
-fn serialize_result_with_format(result: &JsonResult, format: Option<&FormatSpec>) -> Result<String, String> {
+fn serialize_result_with_format(result: &JsonResult, format: Option<&FormatSpec>) -> Result<String, DocError> {
     match format {
         Some(FormatSpec::StandardJsonWithDebug { debug_key }) => {
             let key = debug_key.as_deref().unwrap_or("debug");
             if key == "debug" {
                 // No renaming needed
-                return serde_json::to_string(result).map_err(|e| e.to_string());
+                return serde_json::to_string(result).map_err(|e| DocError::Other(e.to_string()));
             }
-            let mut value = serde_json::to_value(result).map_err(|e| e.to_string())?;
+            let mut value = serde_json::to_value(result).map_err(|e| DocError::Other(e.to_string()))?;
             if let Some(debug) = value.as_object_mut().and_then(|m| m.remove("debug")) {
                 value.as_object_mut().unwrap().insert(key.to_string(), debug);
             }
-            serde_json::to_string(&value).map_err(|e| e.to_string())
+            serde_json::to_string(&value).map_err(|e| DocError::Other(e.to_string()))
         }
-        _ => serde_json::to_string(result).map_err(|e| e.to_string()),
+        _ => serde_json::to_string(result).map_err(|e| DocError::Other(e.to_string())),
     }
 }
 
@@ -473,12 +519,12 @@ fn run_pipeline_from_spec(
     config: &mut TextRankConfig,
     json_config: &JsonConfig,
     workspace: Option<&mut PipelineWorkspace>,
-) -> Result<String, String> {
+) -> Result<String, DocError> {
     // 1. Resolve + validate
-    let resolved = resolve_spec(spec).map_err(|e| e.to_string())?;
+    let resolved = resolve_spec(spec).map_err(|e| DocError::Other(e.to_string()))?;
     let report = ValidationEngine::with_defaults().validate(&resolved);
     if let Some(err) = report.errors().next() {
-        return Err(err.to_string());
+        return Err(DocError::Other(err.to_string()));
     }
 
     // 2. Apply expose → debug_level + debug_top_k
@@ -497,10 +543,18 @@ fn run_pipeline_from_spec(
     // 3a. max_tokens check (before heavy work)
     if let Some(max) = resolved.runtime.max_tokens {
         if tokens.len() > max {
-            return Err(format!(
-                "token count {} exceeds runtime limit of {}",
-                tokens.len(),
-                max
+            return Err(DocError::Pipeline(
+                PipelineRuntimeError::new(
+                    ErrorCode::LimitExceeded,
+                    "/runtime/max_tokens",
+                    "preprocess",
+                    format!(
+                        "token count {} exceeds runtime limit of {}",
+                        tokens.len(),
+                        max
+                    ),
+                )
+                .with_hint("Increase runtime.max_tokens or reduce input size"),
             ));
         }
     }
@@ -529,7 +583,7 @@ fn run_pipeline_from_spec(
 
     let pipeline = builder
         .build(&resolved, config)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| DocError::Other(e.to_string()))?;
 
     let use_timings = resolved
         .expose
@@ -563,8 +617,8 @@ fn run_pipeline_from_spec(
     });
 
     // Check for pipeline-level errors (graph limit exceeded)
-    if let Some(ref err) = formatted.error {
-        return Err(err.clone());
+    if let Some(err) = formatted.error {
+        return Err(DocError::Pipeline(err));
     }
 
     // 7. Serialize with format awareness
@@ -622,18 +676,18 @@ fn formatted_to_json_result(
 /// dispatch.  Pure Rust — no PyO3 dependency — so it can be called from
 /// both `extract_from_json` (single doc) and `extract_jsonl_from_json`
 /// (streaming).
-fn process_single_doc(doc: JsonDocument) -> Result<String, String> {
+fn process_single_doc(doc: JsonDocument) -> Result<String, DocError> {
     // Capabilities discovery (cheapest path)
     if doc.capabilities {
         let response = build_capabilities();
-        return serde_json::to_string(&response).map_err(|e| e.to_string());
+        return serde_json::to_string(&response).map_err(|e| DocError::Other(e.to_string()));
     }
 
     // Validate-only mode (fast path, no extraction)
     if doc.validate_only {
         let pipeline_spec = doc
             .pipeline
-            .ok_or_else(|| "validate_only requires a 'pipeline' field".to_string())?;
+            .ok_or_else(|| DocError::Other("validate_only requires a 'pipeline' field".to_string()))?;
         let response = match resolve_spec(&pipeline_spec) {
             Ok(resolved) => validate_spec_impl(&resolved),
             Err(err) => ValidationResponse {
@@ -643,7 +697,7 @@ fn process_single_doc(doc: JsonDocument) -> Result<String, String> {
                 },
             },
         };
-        return serde_json::to_string(&response).map_err(|e| e.to_string());
+        return serde_json::to_string(&response).map_err(|e| DocError::Other(e.to_string()));
     }
 
     // Convert config & tokens
@@ -677,7 +731,7 @@ fn process_single_doc(doc: JsonDocument) -> Result<String, String> {
 
     let extraction = extract_with_variant(&tokens, &config, &json_config, variant);
     let json_result = extraction_to_json_result(extraction);
-    serde_json::to_string(&json_result).map_err(|e| e.to_string())
+    serde_json::to_string(&json_result).map_err(|e| DocError::Other(e.to_string()))
 }
 
 /// Process a single `JsonDocument` with optional workspace reuse.
@@ -688,18 +742,18 @@ fn process_single_doc(doc: JsonDocument) -> Result<String, String> {
 fn process_single_doc_with_workspace(
     doc: JsonDocument,
     workspace: Option<&mut PipelineWorkspace>,
-) -> Result<String, String> {
+) -> Result<String, DocError> {
     // Capabilities discovery (cheapest path)
     if doc.capabilities {
         let response = build_capabilities();
-        return serde_json::to_string(&response).map_err(|e| e.to_string());
+        return serde_json::to_string(&response).map_err(|e| DocError::Other(e.to_string()));
     }
 
     // Validate-only mode (fast path, no extraction)
     if doc.validate_only {
         let pipeline_spec = doc
             .pipeline
-            .ok_or_else(|| "validate_only requires a 'pipeline' field".to_string())?;
+            .ok_or_else(|| DocError::Other("validate_only requires a 'pipeline' field".to_string()))?;
         let response = match resolve_spec(&pipeline_spec) {
             Ok(resolved) => validate_spec_impl(&resolved),
             Err(err) => ValidationResponse {
@@ -709,7 +763,7 @@ fn process_single_doc_with_workspace(
                 },
             },
         };
-        return serde_json::to_string(&response).map_err(|e| e.to_string());
+        return serde_json::to_string(&response).map_err(|e| DocError::Other(e.to_string()));
     }
 
     // Convert config & tokens
@@ -743,7 +797,7 @@ fn process_single_doc_with_workspace(
 
     let extraction = extract_with_variant(&tokens, &config, &json_config, variant);
     let json_result = extraction_to_json_result(extraction);
-    serde_json::to_string(&json_result).map_err(|e| e.to_string())
+    serde_json::to_string(&json_result).map_err(|e| DocError::Other(e.to_string()))
 }
 
 /// Extract keyphrases from JSON input
@@ -762,7 +816,7 @@ pub fn extract_from_json(py: Python<'_>, json_input: &str) -> PyResult<String> {
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
 
     py.allow_threads(move || process_single_doc(doc))
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
 /// Extract keyphrases from JSONL (newline-delimited JSON) input.
@@ -785,6 +839,7 @@ pub fn extract_from_json(py: Python<'_>, json_input: &str) -> PyResult<String> {
 pub fn extract_jsonl_from_json(py: Python<'_>, jsonl_input: &str) -> PyResult<String> {
     let input = jsonl_input.to_owned();
     let result = py.allow_threads(move || {
+        let mut ws = PipelineWorkspace::new();
         let mut output = String::new();
         for line in input.lines() {
             let trimmed = line.trim();
@@ -792,17 +847,12 @@ pub fn extract_jsonl_from_json(py: Python<'_>, jsonl_input: &str) -> PyResult<St
                 continue;
             }
             let result_line = match serde_json::from_str::<JsonDocument>(trimmed) {
-                Ok(doc) => match process_single_doc(doc) {
+                Ok(doc) => match process_single_doc_with_workspace(doc, Some(&mut ws)) {
                     Ok(json) => json,
-                    Err(e) => {
-                        serde_json::to_string(&serde_json::json!({ "error": e })).unwrap()
-                    }
+                    Err(e) => serialize_doc_error(&e),
                 },
                 Err(e) => {
-                    serde_json::to_string(&serde_json::json!({
-                        "error": format!("Invalid JSON: {e}")
-                    }))
-                    .unwrap()
+                    serialize_doc_error(&DocError::Other(format!("Invalid JSON: {e}")))
                 }
             };
             if !output.is_empty() {
@@ -851,60 +901,27 @@ pub fn validate_pipeline_spec(json_spec: &str) -> PyResult<String> {
 #[pyfunction]
 #[pyo3(signature = (json_input))]
 pub fn extract_batch_from_json(py: Python<'_>, json_input: &str) -> PyResult<String> {
-    // Parse input as array (cheap — no need to release GIL)
     let docs: Vec<JsonDocument> = serde_json::from_str(json_input)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
 
-    // Release the GIL for the entire batch of CPU-intensive extractions.
-    let results: Vec<JsonResult> = py.allow_threads(move || {
-        docs.into_iter()
-            .map(|doc| {
-                let json_config = doc.config.unwrap_or_default();
-                let config: TextRankConfig = json_config.clone().into();
-                let variant = doc
-                    .variant
-                    .as_deref()
-                    .and_then(|value| value.parse().ok())
-                    .unwrap_or(Variant::TextRank);
-                let mut tokens: Vec<Token> = doc.tokens.into_iter().map(Token::from).collect();
-
-                if !config.stopwords.is_empty() {
-                    let stopwords = crate::nlp::stopwords::StopwordFilter::with_additional(
-                        &config.language,
-                        &config.stopwords,
-                    );
-                    for token in &mut tokens {
-                        if stopwords.is_stopword(&token.text) {
-                            token.is_stopword = true;
-                        }
-                    }
-                }
-
-                let extraction =
-                    extract_with_variant(&tokens, &config, &json_config, variant);
-
-                JsonResult {
-                    phrases: extraction
-                        .phrases
-                        .into_iter()
-                        .map(|p| JsonPhrase {
-                            text: p.text,
-                            lemma: p.lemma,
-                            score: p.score,
-                            count: p.count,
-                            rank: p.rank,
-                        })
-                        .collect(),
-                    converged: extraction.converged,
-                    iterations: extraction.iterations,
-                    debug: None,
-                }
-            })
-            .collect()
+    // Release the GIL for the entire batch. A shared PipelineWorkspace
+    // lets pipeline-path docs reuse PageRank buffers across iterations.
+    let result = py.allow_threads(move || {
+        let mut ws = PipelineWorkspace::new();
+        let mut output = String::from("[");
+        for (i, doc) in docs.into_iter().enumerate() {
+            if i > 0 {
+                output.push(',');
+            }
+            match process_single_doc_with_workspace(doc, Some(&mut ws)) {
+                Ok(json) => output.push_str(&json),
+                Err(e) => output.push_str(&serialize_doc_error(&e)),
+            }
+        }
+        output.push(']');
+        output
     });
-
-    serde_json::to_string(&results)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    Ok(result)
 }
 
 /// Python iterator that yields one JSON result string per document.
@@ -940,9 +957,7 @@ impl JsonBatchIter {
                 self.workspace = ws_back;
                 return Some(match result {
                     Ok(json) => json,
-                    Err(e) => {
-                        serde_json::to_string(&serde_json::json!({ "error": e })).unwrap()
-                    }
+                    Err(e) => serialize_doc_error(&e),
                 });
             }
         }
@@ -2338,13 +2353,10 @@ mod tests {
             }
             let result_line = match serde_json::from_str::<JsonDocument>(trimmed) {
                 Ok(doc) => process_single_doc(doc).unwrap_or_else(|e| {
-                    serde_json::to_string(&serde_json::json!({ "error": e })).unwrap()
+                    serialize_doc_error(&e)
                 }),
                 Err(e) => {
-                    serde_json::to_string(&serde_json::json!({
-                        "error": format!("Invalid JSON: {e}")
-                    }))
-                    .unwrap()
+                    serialize_doc_error(&DocError::Other(format!("Invalid JSON: {e}")))
                 }
             };
             if !output.is_empty() {
@@ -2378,13 +2390,10 @@ mod tests {
             }
             let result_line = match serde_json::from_str::<JsonDocument>(trimmed) {
                 Ok(doc) => process_single_doc(doc).unwrap_or_else(|e| {
-                    serde_json::to_string(&serde_json::json!({ "error": e })).unwrap()
+                    serialize_doc_error(&e)
                 }),
                 Err(e) => {
-                    serde_json::to_string(&serde_json::json!({
-                        "error": format!("Invalid JSON: {e}")
-                    }))
-                    .unwrap()
+                    serialize_doc_error(&DocError::Other(format!("Invalid JSON: {e}")))
                 }
             };
             if !output.is_empty() {
@@ -2425,13 +2434,10 @@ mod tests {
             }
             let result_line = match serde_json::from_str::<JsonDocument>(trimmed) {
                 Ok(doc) => process_single_doc(doc).unwrap_or_else(|e| {
-                    serde_json::to_string(&serde_json::json!({ "error": e })).unwrap()
+                    serialize_doc_error(&e)
                 }),
                 Err(e) => {
-                    serde_json::to_string(&serde_json::json!({
-                        "error": format!("Invalid JSON: {e}")
-                    }))
-                    .unwrap()
+                    serialize_doc_error(&DocError::Other(format!("Invalid JSON: {e}")))
                 }
             };
             if !output.is_empty() {
@@ -2808,8 +2814,9 @@ mod tests {
         let result = process_single_doc(doc);
         assert!(result.is_err(), "should reject input with more tokens than max_tokens");
         let err = result.unwrap_err();
-        assert!(err.contains("token count"), "error should mention token count: {}", err);
-        assert!(err.contains("exceeds runtime limit"), "error should mention limit: {}", err);
+        let msg = err.to_string();
+        assert!(msg.contains("token count"), "error should mention token count: {}", msg);
+        assert!(msg.contains("exceeds runtime limit"), "error should mention limit: {}", msg);
     }
 
     #[test]
@@ -2853,7 +2860,8 @@ mod tests {
         let result = process_single_doc(doc);
         assert!(result.is_err(), "should reject graph exceeding max_nodes");
         let err = result.unwrap_err();
-        assert!(err.contains("node count"), "error should mention node count: {}", err);
+        let msg = err.to_string();
+        assert!(msg.contains("node count"), "error should mention node count: {}", msg);
     }
 
     #[test]
@@ -2875,7 +2883,8 @@ mod tests {
         let result = process_single_doc(doc);
         assert!(result.is_err(), "should reject graph exceeding max_edges");
         let err = result.unwrap_err();
-        assert!(err.contains("edge count"), "error should mention edge count: {}", err);
+        let msg = err.to_string();
+        assert!(msg.contains("edge count"), "error should mention edge count: {}", msg);
     }
 
     #[test]
@@ -2931,5 +2940,302 @@ mod tests {
         let result = process_single_doc_with_workspace(doc, Some(&mut ws)).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert!(parsed.get("debug").is_some(), "workspace path should also produce debug output");
+    }
+
+    // ─── Structured errors (Issue 3) ────────────────────────────────
+
+    #[test]
+    fn test_structured_error_shape_max_tokens() {
+        let json_input = format!(
+            r#"{{
+                "tokens": {},
+                "pipeline": {{
+                    "v": 1,
+                    "modules": {{}},
+                    "runtime": {{ "max_tokens": 3 }}
+                }},
+                "config": {{ "determinism": "deterministic" }}
+            }}"#,
+            pipeline_test_tokens_json()
+        );
+        let doc: JsonDocument = serde_json::from_str(&json_input).unwrap();
+        let result = process_single_doc(doc);
+        match result.unwrap_err() {
+            DocError::Pipeline(e) => {
+                assert_eq!(e.code, ErrorCode::LimitExceeded);
+                assert_eq!(e.stage, "preprocess");
+                assert_eq!(e.path, "/runtime/max_tokens");
+                assert!(e.message.contains("token count"));
+                assert!(e.hint.is_some());
+            }
+            DocError::Other(s) => panic!("expected Pipeline error, got Other: {s}"),
+        }
+    }
+
+    #[test]
+    fn test_structured_error_shape_max_nodes() {
+        let json_input = format!(
+            r#"{{
+                "tokens": {},
+                "pipeline": {{
+                    "v": 1,
+                    "modules": {{}},
+                    "runtime": {{ "max_nodes": 1 }}
+                }},
+                "config": {{ "determinism": "deterministic" }}
+            }}"#,
+            pipeline_test_tokens_json()
+        );
+        let doc: JsonDocument = serde_json::from_str(&json_input).unwrap();
+        let result = process_single_doc(doc);
+        match result.unwrap_err() {
+            DocError::Pipeline(e) => {
+                assert_eq!(e.code, ErrorCode::LimitExceeded);
+                assert_eq!(e.stage, "graph");
+                assert_eq!(e.path, "/runtime/max_nodes");
+                assert!(e.message.contains("node count"));
+                assert!(e.hint.is_some());
+            }
+            DocError::Other(s) => panic!("expected Pipeline error, got Other: {s}"),
+        }
+    }
+
+    #[test]
+    fn test_structured_error_serialization() {
+        // Pipeline errors should serialize as {"error": {code, ...}, "error_message": "..."}
+        let json_input = format!(
+            r#"{{
+                "tokens": {},
+                "pipeline": {{
+                    "v": 1,
+                    "modules": {{}},
+                    "runtime": {{ "max_tokens": 3 }}
+                }},
+                "config": {{ "determinism": "deterministic" }}
+            }}"#,
+            pipeline_test_tokens_json()
+        );
+        let doc: JsonDocument = serde_json::from_str(&json_input).unwrap();
+        let err = process_single_doc(doc).unwrap_err();
+        let serialized = serialize_doc_error(&err);
+        let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+
+        // error should be an object with structured fields
+        let error_obj = parsed.get("error").expect("should have 'error' key");
+        assert!(error_obj.is_object(), "pipeline error should be an object");
+        assert_eq!(error_obj["code"], "limit_exceeded");
+        assert_eq!(error_obj["stage"], "preprocess");
+        assert_eq!(error_obj["path"], "/runtime/max_tokens");
+        assert!(error_obj["message"].as_str().unwrap().contains("token count"));
+
+        // error_message should be a flat string for backward compat
+        let error_message = parsed.get("error_message").expect("should have 'error_message'");
+        assert!(error_message.is_string());
+    }
+
+    #[test]
+    fn test_legacy_error_remains_string() {
+        // Non-pipeline errors should serialize as {"error": "plain string"}
+        let err = DocError::Other("something went wrong".to_string());
+        let serialized = serialize_doc_error(&err);
+        let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+
+        let error_val = parsed.get("error").expect("should have 'error' key");
+        assert!(error_val.is_string(), "legacy error should be a plain string");
+        assert_eq!(error_val.as_str().unwrap(), "something went wrong");
+        assert!(parsed.get("error_message").is_none(), "legacy error should not have error_message");
+    }
+
+    // ─── Batch parity (Issue 4) ─────────────────────────────────────
+
+    #[test]
+    fn test_batch_with_pipeline_spec() {
+        // Batch array with pipeline docs should work (previously only legacy was supported)
+        let doc_json = format!(
+            r#"{{
+                "tokens": {},
+                "pipeline": {{ "v": 1, "modules": {{}} }},
+                "config": {{ "determinism": "deterministic" }}
+            }}"#,
+            pipeline_test_tokens_json()
+        );
+        let batch_input = format!("[{doc_json},{doc_json}]");
+        let docs: Vec<JsonDocument> = serde_json::from_str(&batch_input).unwrap();
+        let mut ws = PipelineWorkspace::new();
+        let mut output = String::from("[");
+        for (i, doc) in docs.into_iter().enumerate() {
+            if i > 0 { output.push(','); }
+            match process_single_doc_with_workspace(doc, Some(&mut ws)) {
+                Ok(json) => output.push_str(&json),
+                Err(e) => output.push_str(&serialize_doc_error(&e)),
+            }
+        }
+        output.push(']');
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        for item in arr {
+            assert!(item["phrases"].as_array().unwrap().len() > 0, "each doc should have phrases");
+        }
+    }
+
+    #[test]
+    fn test_batch_mixed_legacy_and_pipeline() {
+        let pipeline_doc = format!(
+            r#"{{
+                "tokens": {},
+                "pipeline": {{ "v": 1, "modules": {{}} }},
+                "config": {{ "determinism": "deterministic" }}
+            }}"#,
+            pipeline_test_tokens_json()
+        );
+        let legacy_doc = format!(
+            r#"{{
+                "tokens": {},
+                "variant": "textrank",
+                "config": {{ "determinism": "deterministic" }}
+            }}"#,
+            pipeline_test_tokens_json()
+        );
+        let batch = format!("[{pipeline_doc},{legacy_doc}]");
+        let docs: Vec<JsonDocument> = serde_json::from_str(&batch).unwrap();
+        let mut ws = PipelineWorkspace::new();
+        let mut output = String::from("[");
+        for (i, doc) in docs.into_iter().enumerate() {
+            if i > 0 { output.push(','); }
+            match process_single_doc_with_workspace(doc, Some(&mut ws)) {
+                Ok(json) => output.push_str(&json),
+                Err(e) => output.push_str(&serialize_doc_error(&e)),
+            }
+        }
+        output.push(']');
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        // Both should produce phrases (pipeline path and legacy path)
+        for item in arr {
+            assert!(item["phrases"].as_array().unwrap().len() > 0);
+        }
+    }
+
+    #[test]
+    fn test_batch_pipeline_with_debug() {
+        let doc_json = format!(
+            r#"{{
+                "tokens": {},
+                "pipeline": {{
+                    "v": 1,
+                    "modules": {{}},
+                    "expose": {{ "graph_stats": true }}
+                }},
+                "config": {{ "determinism": "deterministic" }}
+            }}"#,
+            pipeline_test_tokens_json()
+        );
+        let batch = format!("[{doc_json}]");
+        let docs: Vec<JsonDocument> = serde_json::from_str(&batch).unwrap();
+        let mut ws = PipelineWorkspace::new();
+        let mut output = String::from("[");
+        for (i, doc) in docs.into_iter().enumerate() {
+            if i > 0 { output.push(','); }
+            match process_single_doc_with_workspace(doc, Some(&mut ws)) {
+                Ok(json) => output.push_str(&json),
+                Err(e) => output.push_str(&serialize_doc_error(&e)),
+            }
+        }
+        output.push(']');
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let item = &parsed.as_array().unwrap()[0];
+        assert!(item.get("debug").is_some(), "batch pipeline doc with expose should have debug");
+    }
+
+    #[test]
+    fn test_batch_pipeline_with_error() {
+        // One doc should fail limit, the other should succeed
+        let good_doc = format!(
+            r#"{{
+                "tokens": {},
+                "pipeline": {{ "v": 1, "modules": {{}} }},
+                "config": {{ "determinism": "deterministic" }}
+            }}"#,
+            pipeline_test_tokens_json()
+        );
+        let bad_doc = format!(
+            r#"{{
+                "tokens": {},
+                "pipeline": {{
+                    "v": 1,
+                    "modules": {{}},
+                    "runtime": {{ "max_tokens": 1 }}
+                }},
+                "config": {{ "determinism": "deterministic" }}
+            }}"#,
+            pipeline_test_tokens_json()
+        );
+        let batch = format!("[{good_doc},{bad_doc}]");
+        let docs: Vec<JsonDocument> = serde_json::from_str(&batch).unwrap();
+        let mut ws = PipelineWorkspace::new();
+        let mut output = String::from("[");
+        for (i, doc) in docs.into_iter().enumerate() {
+            if i > 0 { output.push(','); }
+            match process_single_doc_with_workspace(doc, Some(&mut ws)) {
+                Ok(json) => output.push_str(&json),
+                Err(e) => output.push_str(&serialize_doc_error(&e)),
+            }
+        }
+        output.push(']');
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        // First doc succeeds
+        assert!(arr[0].get("phrases").is_some(), "first doc should succeed");
+        // Second doc fails with structured error
+        let error_obj = arr[1].get("error").expect("second doc should have error");
+        assert!(error_obj.is_object(), "pipeline error should be structured");
+        assert_eq!(error_obj["code"], "limit_exceeded");
+    }
+
+    #[test]
+    fn test_jsonl_workspace_reuse() {
+        // 3 JSONL lines through workspace path, all should succeed.
+        // Must compact the tokens JSON to a single line for JSONL format.
+        let tokens_compact: String = pipeline_test_tokens_json()
+            .chars()
+            .filter(|c| *c != '\n')
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<&str>>()
+            .join(" ");
+        let line = format!(
+            r#"{{"tokens": {}, "pipeline": {{ "v": 1, "modules": {{}} }}, "config": {{ "determinism": "deterministic" }}}}"#,
+            tokens_compact
+        );
+        // Verify the line is actually a single line
+        assert!(!line.contains('\n'), "JSONL line must be a single line");
+        let input = format!("{line}\n{line}\n{line}");
+
+        let mut ws = PipelineWorkspace::new();
+        let mut output = String::new();
+        for raw_line in input.lines() {
+            let trimmed = raw_line.trim();
+            if trimmed.is_empty() { continue; }
+            let result_line = match serde_json::from_str::<JsonDocument>(trimmed) {
+                Ok(doc) => match process_single_doc_with_workspace(doc, Some(&mut ws)) {
+                    Ok(json) => json,
+                    Err(e) => serialize_doc_error(&e),
+                },
+                Err(e) => serialize_doc_error(&DocError::Other(format!("Invalid JSON: {e}"))),
+            };
+            if !output.is_empty() { output.push('\n'); }
+            output.push_str(&result_line);
+        }
+
+        let output_lines: Vec<&str> = output.lines().collect();
+        assert_eq!(output_lines.len(), 3, "expected 3 result lines");
+        for line_str in &output_lines {
+            let parsed: serde_json::Value = serde_json::from_str(line_str).unwrap();
+            assert!(parsed["phrases"].as_array().unwrap().len() > 0,
+                "each workspace-reusing line should produce phrases");
+        }
     }
 }
