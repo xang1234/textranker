@@ -3,8 +3,12 @@
 //! For large documents or batch processing, the JSON interface
 //! minimizes Python↔Rust overhead by passing pre-tokenized data.
 
+use crate::phrase::chunker::NounChunker;
 use crate::phrase::extraction::extract_keyphrases_with_info;
+use crate::pipeline::artifacts::TokenStream;
+use crate::pipeline::observer::NoopObserver;
 use crate::pipeline::spec::{PipelineSpec, PipelineSpecV1};
+use crate::pipeline::spec_builder::SpecPipelineBuilder;
 use crate::pipeline::validation::{ValidationEngine, ValidationReport};
 use crate::types::{DeterminismMode, PhraseGrouping, PosTag, ScoreAggregation, TextRankConfig, Token};
 use crate::variants::biased_textrank::BiasedTextRank;
@@ -59,7 +63,7 @@ pub struct JsonDocument {
     pub variant: Option<String>,
     /// Optional pipeline specification for modular pipeline configuration.
     #[serde(default)]
-    pub pipeline: Option<serde_json::Value>,
+    pub pipeline: Option<PipelineSpec>,
     /// When `true`, validate the pipeline spec and return a report
     /// without running extraction.
     #[serde(default)]
@@ -353,13 +357,10 @@ pub fn extract_from_json(py: Python<'_>, json_input: &str) -> PyResult<String> {
 
     // Handle validate-only mode (fast path, no extraction)
     if doc.validate_only {
-        let pipeline_value = doc.pipeline.ok_or_else(|| {
+        let pipeline_spec = doc.pipeline.ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
                 "validate_only requires a 'pipeline' field",
             )
-        })?;
-        let pipeline_spec: PipelineSpec = serde_json::from_value(pipeline_value).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid pipeline spec: {}", e))
         })?;
         let response = match &pipeline_spec {
             PipelineSpec::V1(v1) => validate_spec_impl(v1),
@@ -377,11 +378,6 @@ pub fn extract_from_json(py: Python<'_>, json_input: &str) -> PyResult<String> {
     // Convert config
     let json_config = doc.config.unwrap_or_default();
     let config: TextRankConfig = json_config.clone().into();
-    let variant = doc
-        .variant
-        .as_deref()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(Variant::TextRank);
 
     // Convert tokens
     let mut tokens: Vec<Token> = doc.tokens.into_iter().map(Token::from).collect();
@@ -397,6 +393,57 @@ pub fn extract_from_json(py: Python<'_>, json_input: &str) -> PyResult<String> {
             }
         }
     }
+
+    // Pipeline path — when `pipeline` is present, use the modular pipeline system.
+    // This takes precedence over the `variant` field.
+    if let Some(ref spec) = doc.pipeline {
+        let spec_owned = spec.clone();
+        let json_config_owned = json_config.clone();
+        let result = py.allow_threads(move || {
+            let chunks = NounChunker::new()
+                .with_min_length(config.min_phrase_length)
+                .with_max_length(config.max_phrase_length)
+                .extract_chunks(&tokens);
+
+            let builder = SpecPipelineBuilder::new()
+                .with_chunks(chunks)
+                .with_focus_terms(json_config_owned.focus_terms.clone(), json_config_owned.bias_weight)
+                .with_topic_weights(json_config_owned.topic_weights.clone(), json_config_owned.topic_min_weight);
+
+            let pipeline = builder.build_from_spec(&spec_owned, &config)?;
+            let stream = TokenStream::from_tokens(&tokens);
+            let mut obs = NoopObserver;
+            Ok::<_, crate::pipeline::errors::PipelineSpecError>(pipeline.run(stream, &config, &mut obs))
+        });
+
+        let formatted = result.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+        let json_result = JsonResult {
+            phrases: formatted
+                .phrases
+                .into_iter()
+                .map(|p| JsonPhrase {
+                    text: p.text,
+                    lemma: p.lemma,
+                    score: p.score,
+                    count: p.count,
+                    rank: p.rank,
+                })
+                .collect(),
+            converged: formatted.converged,
+            iterations: formatted.iterations as usize,
+        };
+
+        return serde_json::to_string(&json_result)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
+    }
+
+    // Old variant dispatch path (fallback when `pipeline` is absent)
+    let variant = doc
+        .variant
+        .as_deref()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(Variant::TextRank);
 
     // Release the GIL for CPU-intensive extraction.
     let extraction = py.allow_threads(move || {
@@ -682,7 +729,7 @@ mod tests {
             "pipeline": "textrank"
         }"#).unwrap();
         assert!(doc.validate_only);
-        let spec = serde_json::from_value::<PipelineSpec>(doc.pipeline.unwrap()).unwrap();
+        let spec = doc.pipeline.unwrap();
         assert!(spec.is_preset());
     }
 
@@ -999,5 +1046,219 @@ mod tests {
             builder.get_node_id("learn|VERB").is_none(),
             "Verb 'learn' should not be in graph"
         );
+    }
+
+    // ─── Pipeline execution path tests ─────────────────────────────────
+
+    /// Helper: golden tokens for pipeline tests (multiple sentences for meaningful ranking).
+    fn pipeline_test_tokens_json() -> &'static str {
+        r#"[
+            {"text": "Machine", "lemma": "machine", "pos": "NOUN", "start": 0, "end": 7, "sentence_idx": 0, "token_idx": 0},
+            {"text": "learning", "lemma": "learning", "pos": "NOUN", "start": 8, "end": 16, "sentence_idx": 0, "token_idx": 1},
+            {"text": "uses", "lemma": "use", "pos": "VERB", "start": 17, "end": 21, "sentence_idx": 0, "token_idx": 2},
+            {"text": "algorithms", "lemma": "algorithm", "pos": "NOUN", "start": 22, "end": 32, "sentence_idx": 0, "token_idx": 3},
+            {"text": "Deep", "lemma": "deep", "pos": "ADJ", "start": 34, "end": 38, "sentence_idx": 1, "token_idx": 4},
+            {"text": "learning", "lemma": "learning", "pos": "NOUN", "start": 39, "end": 47, "sentence_idx": 1, "token_idx": 5},
+            {"text": "uses", "lemma": "use", "pos": "VERB", "start": 48, "end": 52, "sentence_idx": 1, "token_idx": 6},
+            {"text": "neural", "lemma": "neural", "pos": "ADJ", "start": 53, "end": 59, "sentence_idx": 1, "token_idx": 7},
+            {"text": "networks", "lemma": "network", "pos": "NOUN", "start": 60, "end": 68, "sentence_idx": 1, "token_idx": 8},
+            {"text": "Machine", "lemma": "machine", "pos": "NOUN", "start": 70, "end": 77, "sentence_idx": 2, "token_idx": 9},
+            {"text": "learning", "lemma": "learning", "pos": "NOUN", "start": 78, "end": 86, "sentence_idx": 2, "token_idx": 10},
+            {"text": "models", "lemma": "model", "pos": "NOUN", "start": 87, "end": 93, "sentence_idx": 2, "token_idx": 11}
+        ]"#
+    }
+
+    #[test]
+    fn test_pipeline_preset_string_execution() {
+        // Pipeline with a preset string should execute through the pipeline path
+        let json_input = format!(
+            r#"{{"tokens": {}, "pipeline": "textrank", "config": {{"determinism": "deterministic"}}}}"#,
+            pipeline_test_tokens_json()
+        );
+        let doc: JsonDocument = serde_json::from_str(&json_input).unwrap();
+        assert!(doc.pipeline.is_some());
+
+        // Execute through the internal extraction path (non-PyO3)
+        let json_config = doc.config.unwrap_or_default();
+        let config: TextRankConfig = json_config.clone().into();
+        let tokens: Vec<Token> = doc.tokens.into_iter().map(Token::from).collect();
+
+        let spec = doc.pipeline.unwrap();
+        let chunks = NounChunker::new()
+            .with_min_length(config.min_phrase_length)
+            .with_max_length(config.max_phrase_length)
+            .extract_chunks(&tokens);
+
+        let builder = SpecPipelineBuilder::new()
+            .with_chunks(chunks)
+            .with_focus_terms(json_config.focus_terms.clone(), json_config.bias_weight)
+            .with_topic_weights(json_config.topic_weights.clone(), json_config.topic_min_weight);
+
+        let pipeline = builder.build_from_spec(&spec, &config).unwrap();
+        let stream = crate::pipeline::artifacts::TokenStream::from_tokens(&tokens);
+        let mut obs = crate::pipeline::observer::NoopObserver;
+        let result = pipeline.run(stream, &config, &mut obs);
+
+        assert!(result.converged);
+        assert!(!result.phrases.is_empty());
+        // Scores should be in descending order
+        for w in result.phrases.windows(2) {
+            assert!(w[0].score >= w[1].score);
+        }
+    }
+
+    #[test]
+    fn test_pipeline_v1_object_execution() {
+        // Pipeline with a V1 object spec
+        let json_input = format!(
+            r#"{{"tokens": {}, "pipeline": {{"v": 1, "modules": {{}}}}, "config": {{"determinism": "deterministic"}}}}"#,
+            pipeline_test_tokens_json()
+        );
+        let doc: JsonDocument = serde_json::from_str(&json_input).unwrap();
+        assert!(matches!(doc.pipeline, Some(PipelineSpec::V1(_))));
+
+        let json_config = doc.config.unwrap_or_default();
+        let config: TextRankConfig = json_config.clone().into();
+        let tokens: Vec<Token> = doc.tokens.into_iter().map(Token::from).collect();
+
+        let spec = doc.pipeline.unwrap();
+        let chunks = NounChunker::new()
+            .with_min_length(config.min_phrase_length)
+            .with_max_length(config.max_phrase_length)
+            .extract_chunks(&tokens);
+
+        let pipeline = SpecPipelineBuilder::new()
+            .with_chunks(chunks)
+            .build_from_spec(&spec, &config)
+            .unwrap();
+        let stream = crate::pipeline::artifacts::TokenStream::from_tokens(&tokens);
+        let mut obs = crate::pipeline::observer::NoopObserver;
+        let result = pipeline.run(stream, &config, &mut obs);
+
+        assert!(result.converged);
+        assert!(!result.phrases.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_preset_with_module_override() {
+        // V1 with preset + module override
+        let json_input = format!(
+            r#"{{
+                "tokens": {},
+                "pipeline": {{
+                    "v": 1,
+                    "preset": "position_rank",
+                    "modules": {{
+                        "graph": {{ "type": "cooccurrence_window", "window_size": 5 }}
+                    }}
+                }},
+                "config": {{"determinism": "deterministic"}}
+            }}"#,
+            pipeline_test_tokens_json()
+        );
+        let doc: JsonDocument = serde_json::from_str(&json_input).unwrap();
+        let json_config = doc.config.unwrap_or_default();
+        let config: TextRankConfig = json_config.clone().into();
+        let tokens: Vec<Token> = doc.tokens.into_iter().map(Token::from).collect();
+
+        let spec = doc.pipeline.unwrap();
+        let chunks = NounChunker::new()
+            .with_min_length(config.min_phrase_length)
+            .with_max_length(config.max_phrase_length)
+            .extract_chunks(&tokens);
+
+        let pipeline = SpecPipelineBuilder::new()
+            .with_chunks(chunks)
+            .build_from_spec(&spec, &config)
+            .unwrap();
+        let stream = crate::pipeline::artifacts::TokenStream::from_tokens(&tokens);
+        let mut obs = crate::pipeline::observer::NoopObserver;
+        let result = pipeline.run(stream, &config, &mut obs);
+
+        assert!(result.converged);
+        assert!(!result.phrases.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_missing_uses_variant_dispatch() {
+        // No pipeline field → falls through to old variant dispatch
+        let json_input = format!(
+            r#"{{"tokens": {}, "config": {{"determinism": "deterministic"}}}}"#,
+            pipeline_test_tokens_json()
+        );
+        let doc: JsonDocument = serde_json::from_str(&json_input).unwrap();
+        assert!(doc.pipeline.is_none());
+
+        // Should use variant dispatch (TextRank by default)
+        let json_config = doc.config.unwrap_or_default();
+        let config: TextRankConfig = json_config.clone().into();
+        let tokens: Vec<Token> = doc.tokens.into_iter().map(Token::from).collect();
+        let result = extract_with_variant(&tokens, &config, &json_config, Variant::TextRank);
+        assert!(result.converged);
+        assert!(!result.phrases.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_invalid_preset_returns_error() {
+        // Invalid preset name should fail at build_from_spec
+        let json_input = format!(
+            r#"{{"tokens": {}, "pipeline": "invalid_name"}}"#,
+            pipeline_test_tokens_json()
+        );
+        let doc: JsonDocument = serde_json::from_str(&json_input).unwrap();
+        let json_config = doc.config.unwrap_or_default();
+        let config: TextRankConfig = json_config.clone().into();
+        let tokens: Vec<Token> = doc.tokens.into_iter().map(Token::from).collect();
+
+        let spec = doc.pipeline.unwrap();
+        let chunks = NounChunker::new().extract_chunks(&tokens);
+        let result = SpecPipelineBuilder::new()
+            .with_chunks(chunks)
+            .build_from_spec(&spec, &config);
+        match result {
+            Err(err) => assert!(err.message.contains("invalid_name")),
+            Ok(_) => panic!("expected error for invalid preset name"),
+        }
+    }
+
+    #[test]
+    fn test_pipeline_takes_precedence_over_variant() {
+        // When both pipeline and variant are present, pipeline wins.
+        // Use "textrank" pipeline (base) but "biased_textrank" variant —
+        // if pipeline wins, it should run without needing focus_terms.
+        let json_input = format!(
+            r#"{{
+                "tokens": {},
+                "variant": "biased_textrank",
+                "pipeline": "textrank",
+                "config": {{"determinism": "deterministic"}}
+            }}"#,
+            pipeline_test_tokens_json()
+        );
+        let doc: JsonDocument = serde_json::from_str(&json_input).unwrap();
+        assert!(doc.pipeline.is_some());
+        assert_eq!(doc.variant.as_deref(), Some("biased_textrank"));
+
+        // Pipeline path should succeed (textrank doesn't need focus_terms)
+        let json_config = doc.config.unwrap_or_default();
+        let config: TextRankConfig = json_config.clone().into();
+        let tokens: Vec<Token> = doc.tokens.into_iter().map(Token::from).collect();
+
+        let spec = doc.pipeline.unwrap();
+        let chunks = NounChunker::new()
+            .with_min_length(config.min_phrase_length)
+            .with_max_length(config.max_phrase_length)
+            .extract_chunks(&tokens);
+
+        let pipeline = SpecPipelineBuilder::new()
+            .with_chunks(chunks)
+            .build_from_spec(&spec, &config)
+            .unwrap();
+        let stream = crate::pipeline::artifacts::TokenStream::from_tokens(&tokens);
+        let mut obs = crate::pipeline::observer::NoopObserver;
+        let result = pipeline.run(stream, &config, &mut obs);
+
+        assert!(result.converged);
+        assert!(!result.phrases.is_empty());
     }
 }
