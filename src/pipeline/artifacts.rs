@@ -1746,8 +1746,8 @@ pub struct PhraseSplitEvent {
 pub enum PhraseSplitReason {
     /// A stopword caused a chunk boundary.
     StopwordBoundary { stopword: String },
-    /// A token was filtered by POS tag (not in include_pos list).
-    PosFilter { token: String, pos: String },
+    /// The chunk was below the configured min length.
+    MinLengthNotMet { length: usize, min: usize },
     /// The chunk exceeded the configured max length.
     MaxLengthExceeded { length: usize, max: usize },
     /// The token's POS tag did not match the noun phrase pattern.

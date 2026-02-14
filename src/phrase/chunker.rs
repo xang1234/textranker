@@ -145,8 +145,27 @@ impl NounChunker {
                     i = next_i;
                     continue;
                 }
+                // Chunk below min length
+                if len < self.config.min_length {
+                    if let Some(ref mut d) = diags {
+                        let chunk_text: String = tokens[span.start_token - tokens[0].token_idx
+                            ..span.end_token - tokens[0].token_idx]
+                            .iter()
+                            .map(|t| t.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        d.push(PhraseSplitEvent {
+                            token_range: (span.start_token, span.end_token),
+                            text: chunk_text,
+                            reason: crate::pipeline::artifacts::PhraseSplitReason::MinLengthNotMet {
+                                length: len,
+                                min: self.config.min_length,
+                            },
+                        });
+                    }
+                }
                 // Chunk exceeded max length
-                if len > self.config.max_length {
+                else if len > self.config.max_length {
                     if let Some(ref mut d) = diags {
                         let chunk_text: String = tokens[span.start_token - tokens[0].token_idx
                             ..span.end_token - tokens[0].token_idx]
@@ -443,6 +462,28 @@ mod tests {
                 crate::pipeline::artifacts::PhraseSplitReason::MaxLengthExceeded { .. }
             )),
             "Expected max length exceeded event, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_extract_chunks_into_records_min_length_not_met() {
+        let tokens = vec![
+            Token::new("machine", "machine", PosTag::Noun, 0, 7, 0, 0),
+        ];
+
+        // min_length=2 means a single-noun phrase (len 1) is too short
+        let chunker = NounChunker::new().with_min_length(2);
+        let mut diags = Vec::new();
+        let chunks = chunker.extract_chunks_into(&tokens, Some(&mut diags));
+
+        assert!(chunks.is_empty());
+        assert!(
+            diags.iter().any(|e| matches!(
+                &e.reason,
+                crate::pipeline::artifacts::PhraseSplitReason::MinLengthNotMet { .. }
+            )),
+            "Expected min length not met event, got: {:?}",
             diags
         );
     }
