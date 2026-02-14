@@ -362,6 +362,7 @@ fn extract_with_variant(
                 phrases: formatted.phrases,
                 converged: formatted.converged,
                 iterations: formatted.iterations as usize,
+                debug: formatted.debug,
             }
         }
     }
@@ -670,7 +671,7 @@ fn extraction_to_json_result(result: crate::phrase::extraction::ExtractionResult
             .collect(),
         converged: result.converged,
         iterations: result.iterations,
-        debug: None,
+        debug: result.debug,
     }
 }
 

@@ -4,9 +4,10 @@
 //! and selects the most common surface form as canonical.
 
 use super::chunker::{chunk_lemma, chunk_text, NounChunker};
-use super::dedup::{resolve_overlaps_greedy, ScoredChunk};
+use super::dedup::{resolve_overlaps_greedy, resolve_overlaps_greedy_with_diagnostics, ScoredChunk};
 use crate::graph::csr::CsrGraph;
 use crate::pagerank::PageRankResult;
+use crate::pipeline::artifacts::{DroppedCandidate, ExtractionDiagnostics};
 use crate::types::{Phrase, PhraseGrouping, ScoreAggregation, TextRankConfig, Token};
 use rustc_hash::FxHashMap;
 
@@ -96,8 +97,98 @@ impl PhraseExtractor {
         phrases
     }
 
-    /// Score a chunk based on its constituent tokens' PageRank scores
-    fn score_chunks(
+    /// Extract phrases with full diagnostics.
+    ///
+    /// Only called when `debug_level >= Full`. Records:
+    /// - Chunk formation events (stopword splits, POS rejections, etc.)
+    /// - Overlap dedup drops
+    /// - Zero-score drops
+    /// - BelowTopN drops
+    pub fn extract_with_diagnostics(
+        &self,
+        tokens: &[Token],
+        graph: &CsrGraph,
+        pagerank: &PageRankResult,
+    ) -> (Vec<Phrase>, ExtractionDiagnostics) {
+        let mut chunk_events = Vec::new();
+
+        // Extract noun chunks with diagnostic recording
+        let chunker = NounChunker::new()
+            .with_min_length(self.config.min_phrase_length)
+            .with_max_length(self.config.max_phrase_length);
+        let chunks = chunker.extract_chunks_into(tokens, Some(&mut chunk_events));
+
+        // Score each chunk (including zero-score for diagnostics)
+        let all_scored = self.score_chunks_all(tokens, &chunks, graph, pagerank);
+
+        // Record zero-score drops
+        let mut dropped_candidates: Vec<DroppedCandidate> = Vec::new();
+        let scored_chunks: Vec<ScoredChunk> = all_scored
+            .into_iter()
+            .filter(|sc| {
+                if sc.score <= 0.0 {
+                    dropped_candidates.push(DroppedCandidate {
+                        text: sc.text.clone(),
+                        lemma: sc.lemma.clone(),
+                        score: sc.score,
+                        token_range: (sc.chunk.start_token, sc.chunk.end_token),
+                        reason: crate::pipeline::artifacts::DropReason::ZeroScore,
+                    });
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        // Resolve overlaps with diagnostics
+        let (deduped, overlap_drops) =
+            resolve_overlaps_greedy_with_diagnostics(scored_chunks);
+        dropped_candidates.extend(overlap_drops);
+
+        // Group variants and create phrases with canonical forms
+        let mut phrases = self.group_phrases(deduped);
+
+        // Sort by score descending (with stable tie-breakers in deterministic mode).
+        if self.config.determinism.is_deterministic() {
+            phrases.sort_by(|a, b| a.stable_cmp(b));
+        } else {
+            phrases.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        }
+
+        // Assign ranks
+        for (i, phrase) in phrases.iter_mut().enumerate() {
+            phrase.rank = i + 1;
+        }
+
+        // Limit to top_n if specified, recording BelowTopN drops
+        if self.config.top_n > 0 && phrases.len() > self.config.top_n {
+            for phrase in phrases.drain(self.config.top_n..) {
+                dropped_candidates.push(DroppedCandidate {
+                    text: phrase.text,
+                    lemma: phrase.lemma,
+                    score: phrase.score,
+                    token_range: phrase
+                        .offsets
+                        .first()
+                        .copied()
+                        .unwrap_or((0, 0)),
+                    reason: crate::pipeline::artifacts::DropReason::BelowTopN {
+                        top_n: self.config.top_n,
+                    },
+                });
+            }
+        }
+
+        let diags = ExtractionDiagnostics {
+            chunk_events,
+            dropped_candidates,
+        };
+        (phrases, diags)
+    }
+
+    /// Score all chunks (including zero-score ones).
+    fn score_chunks_all(
         &self,
         tokens: &[Token],
         chunks: &[crate::types::ChunkSpan],
@@ -130,6 +221,19 @@ impl PhraseExtractor {
                     lemma: chunk_lemma(tokens, chunk),
                 }
             })
+            .collect()
+    }
+
+    /// Score chunks and filter out zero-score entries.
+    fn score_chunks(
+        &self,
+        tokens: &[Token],
+        chunks: &[crate::types::ChunkSpan],
+        graph: &CsrGraph,
+        pagerank: &PageRankResult,
+    ) -> Vec<ScoredChunk> {
+        self.score_chunks_all(tokens, chunks, graph, pagerank)
+            .into_iter()
             .filter(|sc| sc.score > 0.0)
             .collect()
     }
@@ -224,7 +328,7 @@ impl PhraseExtractor {
 }
 
 /// Result of keyphrase extraction including convergence info
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ExtractionResult {
     /// Extracted phrases
     pub phrases: Vec<Phrase>,
@@ -232,6 +336,18 @@ pub struct ExtractionResult {
     pub converged: bool,
     /// Number of PageRank iterations
     pub iterations: usize,
+    /// Optional debug/inspect payload (populated when `debug_level > None`).
+    pub debug: Option<crate::pipeline::artifacts::DebugPayload>,
+}
+
+/// Manual `PartialEq` that ignores `debug` — the payload contains `f64` fields
+/// and is irrelevant for golden-test comparisons.
+impl PartialEq for ExtractionResult {
+    fn eq(&self, other: &Self) -> bool {
+        self.phrases == other.phrases
+            && self.converged == other.converged
+            && self.iterations == other.iterations
+    }
 }
 
 /// Extract phrases using the full TextRank pipeline
@@ -277,6 +393,7 @@ pub fn extract_keyphrases_with_info(tokens: &[Token], config: &TextRankConfig) -
             phrases: Vec::new(),
             converged: true,
             iterations: 0,
+            debug: None,
         };
     }
 
@@ -288,16 +405,36 @@ pub fn extract_keyphrases_with_info(tokens: &[Token], config: &TextRankConfig) -
     let converged = rank_output.converged();
     let iterations = rank_output.iterations() as usize;
 
+    // Build debug payload BEFORE the consuming move of rank_output.
+    let mut debug = crate::pipeline::artifacts::DebugPayload::build(
+        config.debug_level,
+        &graph,
+        &rank_output,
+        config.debug_top_k,
+    );
+
     // Stage 4: phrase extraction — use original &[Token] directly,
     // avoiding the to_legacy_tokens() round-trip.
     let pagerank_result = rank_output.into_pagerank_result();
     let extractor = PhraseExtractor::with_config(config.clone());
-    let phrases = extractor.extract(tokens, graph.csr(), &pagerank_result);
+
+    let phrases = if config.debug_level.includes_full() {
+        let (phrases, diags) =
+            extractor.extract_with_diagnostics(tokens, graph.csr(), &pagerank_result);
+        if let Some(ref mut dbg) = debug {
+            dbg.phrase_diagnostics = Some(diags.chunk_events);
+            dbg.dropped_candidates = Some(diags.dropped_candidates);
+        }
+        phrases
+    } else {
+        extractor.extract(tokens, graph.csr(), &pagerank_result)
+    };
 
     ExtractionResult {
         phrases,
         converged,
         iterations,
+        debug,
     }
 }
 
@@ -619,6 +756,86 @@ mod tests {
         assert_eq!(phrases.len(), 1);
         // Lexicographically smaller "Networks" < "networks" (uppercase < lowercase)
         assert_eq!(phrases[0].text, "Networks");
+    }
+
+    // ================================================================
+    // Debug wiring tests
+    // ================================================================
+
+    #[test]
+    fn test_debug_none_produces_no_payload() {
+        let tokens = make_tokens();
+        let config = TextRankConfig {
+            debug_level: crate::pipeline::artifacts::DebugLevel::None,
+            ..TextRankConfig::default()
+        };
+        let result = extract_keyphrases_with_info(&tokens, &config);
+        assert!(result.debug.is_none());
+    }
+
+    #[test]
+    fn test_debug_stats_produces_graph_stats_and_convergence() {
+        let tokens = make_tokens();
+        let config = TextRankConfig {
+            debug_level: crate::pipeline::artifacts::DebugLevel::Stats,
+            ..TextRankConfig::default()
+        };
+        let result = extract_keyphrases_with_info(&tokens, &config);
+        let dbg = result.debug.as_ref().expect("debug payload should be Some at Stats level");
+
+        // Graph stats present
+        let gs = dbg.graph_stats.as_ref().expect("graph_stats should be present");
+        assert!(gs.num_nodes > 0);
+        assert!(gs.num_edges > 0);
+        assert!(gs.avg_degree > 0.0);
+
+        // Convergence summary present
+        let cs = dbg.convergence_summary.as_ref().expect("convergence_summary should be present");
+        assert!(cs.converged);
+        assert!(cs.iterations > 0);
+
+        // Full-level fields should NOT be populated at Stats level
+        assert!(dbg.phrase_diagnostics.is_none());
+        assert!(dbg.dropped_candidates.is_none());
+        assert!(dbg.node_scores.is_none()); // TopNodes not reached
+    }
+
+    #[test]
+    fn test_debug_full_produces_phrase_diagnostics() {
+        let tokens = make_tokens();
+        let config = TextRankConfig {
+            debug_level: crate::pipeline::artifacts::DebugLevel::Full,
+            ..TextRankConfig::default()
+        };
+        let result = extract_keyphrases_with_info(&tokens, &config);
+        let dbg = result.debug.as_ref().expect("debug payload should be Some at Full level");
+
+        // Graph stats and convergence are present (inherited from lower levels)
+        assert!(dbg.graph_stats.is_some());
+        assert!(dbg.convergence_summary.is_some());
+
+        // Full-level specific: phrase diagnostics
+        let pd = dbg.phrase_diagnostics.as_ref().expect("phrase_diagnostics should be present at Full level");
+        // The sentence has non-noun tokens (verb, determiner, preposition) that should generate events
+        assert!(!pd.is_empty(), "Should have at least one phrase split event");
+
+        // Full-level specific: dropped candidates (may or may not have entries depending on extraction)
+        assert!(dbg.dropped_candidates.is_some());
+
+        // Node scores should also be present at Full level (includes TopNodes)
+        assert!(dbg.node_scores.is_some());
+    }
+
+    #[test]
+    fn test_debug_empty_input_produces_no_payload() {
+        let tokens: Vec<Token> = Vec::new();
+        let config = TextRankConfig {
+            debug_level: crate::pipeline::artifacts::DebugLevel::Full,
+            ..TextRankConfig::default()
+        };
+        let result = extract_keyphrases_with_info(&tokens, &config);
+        // Empty input → early return with debug: None
+        assert!(result.debug.is_none());
     }
 
     /// In deterministic mode, group_phrases produces groups in sorted key order.

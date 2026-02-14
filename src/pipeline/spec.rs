@@ -789,6 +789,11 @@ pub struct ExposeSpec {
     /// Request per-stage timing measurements.
     #[serde(default)]
     pub stage_timings: bool,
+
+    /// Request phrase formation diagnostics (Full level).
+    /// When enabled, phrase split events and dropped candidates are recorded.
+    #[serde(default)]
+    pub phrase_diagnostics: bool,
 }
 
 /// Sub-spec for node score exposure.
@@ -814,6 +819,7 @@ impl ExposeSpec {
         self.graph_stats
             || self.stage_timings
             || self.clusters
+            || self.phrase_diagnostics
             || self.node_scores.is_some()
             || self.pagerank.is_some()
     }
@@ -836,8 +842,8 @@ impl ExposeSpec {
             return DebugLevel::None;
         }
 
-        // Full: residuals or clusters
-        if self.clusters {
+        // Full: residuals, clusters, or phrase diagnostics
+        if self.clusters || self.phrase_diagnostics {
             return DebugLevel::Full;
         }
         if let Some(ref pr) = self.pagerank {
@@ -1472,6 +1478,7 @@ mod tests {
             pagerank: Some(PageRankExposeSpec { residuals: true }),
             clusters: false,
             stage_timings: true,
+            phrase_diagnostics: false,
         };
         let json = serde_json::to_string(&expose).unwrap();
         let back: ExposeSpec = serde_json::from_str(&json).unwrap();

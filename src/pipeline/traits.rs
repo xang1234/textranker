@@ -6657,12 +6657,16 @@ mod tests {
             graph_stats: Some(crate::pipeline::artifacts::GraphStats {
                 num_nodes: 5,
                 num_edges: 8,
+                avg_degree: 8.0 / 5.0,
                 is_transformed: false,
             }),
             stage_timings: None,
             residuals: None,
             convergence_summary: None,
             cluster_memberships: None,
+            cluster_details: None,
+            phrase_diagnostics: None,
+            dropped_candidates: None,
         };
 
         let result = StandardResultFormatter.format(&phrases, &ranks, Some(debug), &cfg);

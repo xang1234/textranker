@@ -3,6 +3,7 @@
 //! Identifies noun phrases using pattern matching on POS tags.
 //! Pattern: (DET)? (ADJ)* (NOUN|PROPN)+
 
+use crate::pipeline::artifacts::PhraseSplitEvent;
 use crate::types::{ChunkSpan, PosTag, Token};
 
 /// Configuration for noun chunk detection
@@ -63,10 +64,24 @@ impl NounChunker {
         self
     }
 
-    /// Extract noun chunks from tokens
+    /// Extract noun chunks from tokens.
     ///
     /// Pattern: (DET)? (ADJ)* (NOUN|PROPN)+
     pub fn extract_chunks(&self, tokens: &[Token]) -> Vec<ChunkSpan> {
+        self.extract_chunks_into(tokens, None)
+    }
+
+    /// Extract noun chunks with an optional diagnostics sink.
+    ///
+    /// When `diagnostics` is `None`, behavior is identical to
+    /// [`extract_chunks`](NounChunker::extract_chunks) with zero overhead.
+    /// When `Some`, every decision point records a [`PhraseSplitEvent`] explaining
+    /// why a token was skipped or a chunk was rejected.
+    pub fn extract_chunks_into(
+        &self,
+        tokens: &[Token],
+        mut diagnostics: Option<&mut Vec<PhraseSplitEvent>>,
+    ) -> Vec<ChunkSpan> {
         let mut chunks = Vec::new();
 
         // Group tokens by sentence
@@ -89,18 +104,34 @@ impl NounChunker {
 
         // Extract chunks from each sentence
         for sent_tokens in sentences {
-            self.extract_chunks_from_sentence(&sent_tokens, &mut chunks);
+            self.extract_chunks_from_sentence(&sent_tokens, &mut chunks, diagnostics.as_deref_mut());
         }
 
         chunks
     }
 
-    /// Extract chunks from a single sentence
-    fn extract_chunks_from_sentence(&self, tokens: &[&Token], chunks: &mut Vec<ChunkSpan>) {
+    /// Extract chunks from a single sentence, optionally recording diagnostics.
+    fn extract_chunks_from_sentence(
+        &self,
+        tokens: &[&Token],
+        chunks: &mut Vec<ChunkSpan>,
+        diagnostics: Option<&mut Vec<PhraseSplitEvent>>,
+    ) {
         let mut i = 0;
+        // Rebind to make it mutable for repeated use
+        let mut diags = diagnostics;
 
         while i < tokens.len() {
             if tokens[i].is_stopword {
+                if let Some(ref mut d) = diags {
+                    d.push(PhraseSplitEvent {
+                        token_range: (tokens[i].token_idx, tokens[i].token_idx + 1),
+                        text: tokens[i].text.clone(),
+                        reason: crate::pipeline::artifacts::PhraseSplitReason::StopwordBoundary {
+                            stopword: tokens[i].text.clone(),
+                        },
+                    });
+                }
                 i += 1;
                 continue;
             }
@@ -113,6 +144,37 @@ impl NounChunker {
                     chunks.push(span);
                     i = next_i;
                     continue;
+                }
+                // Chunk exceeded max length
+                if len > self.config.max_length {
+                    if let Some(ref mut d) = diags {
+                        let chunk_text: String = tokens[span.start_token - tokens[0].token_idx
+                            ..span.end_token - tokens[0].token_idx]
+                            .iter()
+                            .map(|t| t.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        d.push(PhraseSplitEvent {
+                            token_range: (span.start_token, span.end_token),
+                            text: chunk_text,
+                            reason: crate::pipeline::artifacts::PhraseSplitReason::MaxLengthExceeded {
+                                length: len,
+                                max: self.config.max_length,
+                            },
+                        });
+                    }
+                }
+            } else {
+                // match_noun_phrase returned None — token doesn't start a noun phrase
+                if let Some(ref mut d) = diags {
+                    d.push(PhraseSplitEvent {
+                        token_range: (tokens[i].token_idx, tokens[i].token_idx + 1),
+                        text: tokens[i].text.clone(),
+                        reason: crate::pipeline::artifacts::PhraseSplitReason::PatternMismatch {
+                            token: tokens[i].text.clone(),
+                            pos: format!("{:?}", tokens[i].pos),
+                        },
+                    });
                 }
             }
             i += 1;
@@ -294,5 +356,94 @@ mod tests {
 
         // Should not merge across sentences
         assert_eq!(chunks.len(), 2);
+    }
+
+    // ─── Diagnostics tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_extract_chunks_into_none_identical() {
+        let tokens = make_tokens();
+        let chunker = NounChunker::new();
+
+        let chunks_standard = chunker.extract_chunks(&tokens);
+        let chunks_into = chunker.extract_chunks_into(&tokens, None);
+
+        assert_eq!(chunks_standard.len(), chunks_into.len());
+        for (a, b) in chunks_standard.iter().zip(chunks_into.iter()) {
+            assert_eq!(a.start_token, b.start_token);
+            assert_eq!(a.end_token, b.end_token);
+        }
+    }
+
+    #[test]
+    fn test_extract_chunks_into_records_stopword_boundary() {
+        let mut tokens = vec![
+            Token::new("machine", "machine", PosTag::Noun, 0, 7, 0, 0),
+            Token::new("is", "be", PosTag::Verb, 8, 10, 0, 1),
+            Token::new("fast", "fast", PosTag::Adjective, 11, 15, 0, 2),
+        ];
+        tokens[1].is_stopword = true;
+
+        let chunker = NounChunker::new();
+        let mut diags = Vec::new();
+        let _chunks = chunker.extract_chunks_into(&tokens, Some(&mut diags));
+
+        // "is" should be recorded as a stopword boundary
+        assert!(
+            diags.iter().any(|e| e.text == "is"
+                && matches!(
+                    &e.reason,
+                    crate::pipeline::artifacts::PhraseSplitReason::StopwordBoundary { .. }
+                )),
+            "Expected stopword boundary event for 'is', got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_extract_chunks_into_records_pattern_mismatch() {
+        let tokens = vec![
+            Token::new("quickly", "quickly", PosTag::Adverb, 0, 7, 0, 0),
+            Token::new("runs", "run", PosTag::Verb, 8, 12, 0, 1),
+        ];
+
+        let chunker = NounChunker::new();
+        let mut diags = Vec::new();
+        let chunks = chunker.extract_chunks_into(&tokens, Some(&mut diags));
+
+        assert!(chunks.is_empty());
+        // Both tokens should produce PatternMismatch events
+        assert!(
+            diags.iter().any(|e| e.text == "quickly"
+                && matches!(
+                    &e.reason,
+                    crate::pipeline::artifacts::PhraseSplitReason::PatternMismatch { .. }
+                )),
+            "Expected pattern mismatch for 'quickly'"
+        );
+    }
+
+    #[test]
+    fn test_extract_chunks_into_records_max_length_exceeded() {
+        let tokens = vec![
+            Token::new("big", "big", PosTag::Adjective, 0, 3, 0, 0),
+            Token::new("red", "red", PosTag::Adjective, 4, 7, 0, 1),
+            Token::new("fast", "fast", PosTag::Adjective, 8, 12, 0, 2),
+            Token::new("machine", "machine", PosTag::Noun, 13, 20, 0, 3),
+        ];
+
+        // max_length=2 means "big red fast machine" (len 4) exceeds it
+        let chunker = NounChunker::new().with_max_length(2);
+        let mut diags = Vec::new();
+        let _chunks = chunker.extract_chunks_into(&tokens, Some(&mut diags));
+
+        assert!(
+            diags.iter().any(|e| matches!(
+                &e.reason,
+                crate::pipeline::artifacts::PhraseSplitReason::MaxLengthExceeded { .. }
+            )),
+            "Expected max length exceeded event, got: {:?}",
+            diags
+        );
     }
 }

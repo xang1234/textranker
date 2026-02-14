@@ -16,6 +16,15 @@ pub fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<native::PyPhrase>()?;
     m.add_class::<native::PyTextRankResult>()?;
     m.add_class::<native::PyTextRankConfig>()?;
+
+    // Debug / inspect classes
+    m.add_class::<native::PyDebugPayload>()?;
+    m.add_class::<native::PyGraphStats>()?;
+    m.add_class::<native::PyConvergenceSummary>()?;
+    m.add_class::<native::PyPhraseSplitEvent>()?;
+    m.add_class::<native::PyDroppedCandidate>()?;
+    m.add_class::<native::PyClusterMember>()?;
+    m.add_class::<native::PyClusterDetail>()?;
     m.add_class::<native::PyBaseTextRank>()?;
     m.add_class::<native::PyPositionRank>()?;
     m.add_class::<native::PyBiasedTextRank>()?;

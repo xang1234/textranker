@@ -6,7 +6,7 @@
 use crate::nlp::stopwords::StopwordFilter;
 use crate::nlp::tokenizer::Tokenizer;
 use crate::phrase::extraction::extract_keyphrases_with_info;
-use crate::pipeline::artifacts::TokenStream;
+use crate::pipeline::artifacts::{DebugLevel, DebugPayload, TokenStream};
 use crate::pipeline::observer::NoopObserver;
 #[cfg(feature = "sentence-rank")]
 use crate::pipeline::runner::SentenceRankPipeline;
@@ -17,6 +17,7 @@ use crate::variants::position_rank::PositionRank;
 use crate::variants::single_rank::SingleRank;
 use crate::variants::topical_pagerank::TopicalPageRank;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -62,6 +63,378 @@ impl From<Phrase> for PyPhrase {
     }
 }
 
+// ─── Debug / Inspect Python classes ──────────────────────────────────────
+
+/// Graph statistics from the co-occurrence graph.
+#[pyclass(name = "GraphStats")]
+#[derive(Clone)]
+pub struct PyGraphStats {
+    #[pyo3(get)]
+    pub num_nodes: usize,
+    #[pyo3(get)]
+    pub num_edges: usize,
+    #[pyo3(get)]
+    pub avg_degree: f64,
+    #[pyo3(get)]
+    pub is_transformed: bool,
+}
+
+#[pymethods]
+impl PyGraphStats {
+    fn __repr__(&self) -> String {
+        format!(
+            "GraphStats(num_nodes={}, num_edges={}, avg_degree={:.2})",
+            self.num_nodes, self.num_edges, self.avg_degree
+        )
+    }
+
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("num_nodes", self.num_nodes)?;
+        d.set_item("num_edges", self.num_edges)?;
+        d.set_item("avg_degree", self.avg_degree)?;
+        d.set_item("is_transformed", self.is_transformed)?;
+        Ok(d)
+    }
+}
+
+/// Convergence summary from PageRank.
+#[pyclass(name = "ConvergenceSummary")]
+#[derive(Clone)]
+pub struct PyConvergenceSummary {
+    #[pyo3(get)]
+    pub iterations: u32,
+    #[pyo3(get)]
+    pub converged: bool,
+    #[pyo3(get)]
+    pub final_delta: f64,
+}
+
+#[pymethods]
+impl PyConvergenceSummary {
+    fn __repr__(&self) -> String {
+        format!(
+            "ConvergenceSummary(iterations={}, converged={}, final_delta={:.2e})",
+            self.iterations, self.converged, self.final_delta
+        )
+    }
+
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("iterations", self.iterations)?;
+        d.set_item("converged", self.converged)?;
+        d.set_item("final_delta", self.final_delta)?;
+        Ok(d)
+    }
+}
+
+/// Records why a potential phrase was split or rejected during chunking.
+#[pyclass(name = "PhraseSplitEvent")]
+#[derive(Clone)]
+pub struct PyPhraseSplitEvent {
+    #[pyo3(get)]
+    pub token_range: (usize, usize),
+    #[pyo3(get)]
+    pub text: String,
+    #[pyo3(get)]
+    pub reason: String,
+}
+
+#[pymethods]
+impl PyPhraseSplitEvent {
+    fn __repr__(&self) -> String {
+        format!(
+            "PhraseSplitEvent(text='{}', reason='{}')",
+            self.text, self.reason
+        )
+    }
+
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("token_range", self.token_range)?;
+        d.set_item("text", &self.text)?;
+        d.set_item("reason", &self.reason)?;
+        Ok(d)
+    }
+}
+
+/// Records a phrase candidate that was dropped.
+#[pyclass(name = "DroppedCandidate")]
+#[derive(Clone)]
+pub struct PyDroppedCandidate {
+    #[pyo3(get)]
+    pub text: String,
+    #[pyo3(get)]
+    pub lemma: String,
+    #[pyo3(get)]
+    pub score: f64,
+    #[pyo3(get)]
+    pub token_range: (usize, usize),
+    #[pyo3(get)]
+    pub reason: String,
+}
+
+#[pymethods]
+impl PyDroppedCandidate {
+    fn __repr__(&self) -> String {
+        format!(
+            "DroppedCandidate(text='{}', score={:.4}, reason='{}')",
+            self.text, self.score, self.reason
+        )
+    }
+
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("text", &self.text)?;
+        d.set_item("lemma", &self.lemma)?;
+        d.set_item("score", self.score)?;
+        d.set_item("token_range", self.token_range)?;
+        d.set_item("reason", &self.reason)?;
+        Ok(d)
+    }
+}
+
+/// Enriched cluster member with text metadata.
+#[pyclass(name = "ClusterMember")]
+#[derive(Clone)]
+pub struct PyClusterMember {
+    #[pyo3(get)]
+    pub index: usize,
+    #[pyo3(get)]
+    pub text: String,
+    #[pyo3(get)]
+    pub lemma: String,
+}
+
+#[pymethods]
+impl PyClusterMember {
+    fn __repr__(&self) -> String {
+        format!(
+            "ClusterMember(index={}, text='{}', lemma='{}')",
+            self.index, self.text, self.lemma
+        )
+    }
+
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("index", self.index)?;
+        d.set_item("text", &self.text)?;
+        d.set_item("lemma", &self.lemma)?;
+        Ok(d)
+    }
+}
+
+/// Cluster detail: a cluster index and its members.
+#[pyclass(name = "ClusterDetail")]
+#[derive(Clone)]
+pub struct PyClusterDetail {
+    #[pyo3(get)]
+    pub cluster_index: usize,
+    #[pyo3(get)]
+    pub members: Vec<PyClusterMember>,
+}
+
+#[pymethods]
+impl PyClusterDetail {
+    fn __repr__(&self) -> String {
+        format!(
+            "ClusterDetail(cluster_index={}, members={})",
+            self.cluster_index,
+            self.members.len()
+        )
+    }
+
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("cluster_index", self.cluster_index)?;
+        let members: Vec<_> = self
+            .members
+            .iter()
+            .map(|m| m.to_dict(py))
+            .collect::<PyResult<Vec<_>>>()?;
+        d.set_item("members", members)?;
+        Ok(d)
+    }
+}
+
+/// Debug/inspect payload from the extraction pipeline.
+#[pyclass(name = "DebugPayload")]
+#[derive(Clone)]
+pub struct PyDebugPayload {
+    #[pyo3(get)]
+    pub graph_stats: Option<PyGraphStats>,
+    #[pyo3(get)]
+    pub convergence_summary: Option<PyConvergenceSummary>,
+    #[pyo3(get)]
+    pub node_scores: Option<Vec<(String, f64)>>,
+    #[pyo3(get)]
+    pub stage_timings: Option<Vec<(String, f64)>>,
+    #[pyo3(get)]
+    pub residuals: Option<Vec<f64>>,
+    #[pyo3(get)]
+    pub cluster_memberships: Option<Vec<Vec<usize>>>,
+    #[pyo3(get)]
+    pub cluster_details: Option<Vec<PyClusterDetail>>,
+    #[pyo3(get)]
+    pub phrase_diagnostics: Option<Vec<PyPhraseSplitEvent>>,
+    #[pyo3(get)]
+    pub dropped_candidates: Option<Vec<PyDroppedCandidate>>,
+}
+
+#[pymethods]
+impl PyDebugPayload {
+    fn __repr__(&self) -> String {
+        let mut parts = Vec::new();
+        if self.graph_stats.is_some() {
+            parts.push("graph_stats");
+        }
+        if self.convergence_summary.is_some() {
+            parts.push("convergence_summary");
+        }
+        if self.node_scores.is_some() {
+            parts.push("node_scores");
+        }
+        if self.phrase_diagnostics.is_some() {
+            parts.push("phrase_diagnostics");
+        }
+        if self.dropped_candidates.is_some() {
+            parts.push("dropped_candidates");
+        }
+        if self.cluster_details.is_some() {
+            parts.push("cluster_details");
+        }
+        format!("DebugPayload(fields=[{}])", parts.join(", "))
+    }
+
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        if let Some(ref gs) = self.graph_stats {
+            d.set_item("graph_stats", gs.to_dict(py)?)?;
+        }
+        if let Some(ref cs) = self.convergence_summary {
+            d.set_item("convergence_summary", cs.to_dict(py)?)?;
+        }
+        if let Some(ref ns) = self.node_scores {
+            d.set_item("node_scores", ns.clone())?;
+        }
+        if let Some(ref st) = self.stage_timings {
+            d.set_item("stage_timings", st.clone())?;
+        }
+        if let Some(ref r) = self.residuals {
+            d.set_item("residuals", r.clone())?;
+        }
+        if let Some(ref cm) = self.cluster_memberships {
+            d.set_item("cluster_memberships", cm.clone())?;
+        }
+        if let Some(ref cd) = self.cluster_details {
+            let details: Vec<_> = cd
+                .iter()
+                .map(|c| c.to_dict(py))
+                .collect::<PyResult<Vec<_>>>()?;
+            d.set_item("cluster_details", details)?;
+        }
+        if let Some(ref pd) = self.phrase_diagnostics {
+            let events: Vec<_> = pd
+                .iter()
+                .map(|e| e.to_dict(py))
+                .collect::<PyResult<Vec<_>>>()?;
+            d.set_item("phrase_diagnostics", events)?;
+        }
+        if let Some(ref dc) = self.dropped_candidates {
+            let drops: Vec<_> = dc
+                .iter()
+                .map(|c| c.to_dict(py))
+                .collect::<PyResult<Vec<_>>>()?;
+            d.set_item("dropped_candidates", drops)?;
+        }
+        Ok(d)
+    }
+}
+
+/// Convert a Rust `DebugPayload` into the Python wrapper.
+fn convert_debug_payload(payload: DebugPayload) -> PyDebugPayload {
+    let graph_stats = payload.graph_stats.map(|gs| PyGraphStats {
+        num_nodes: gs.num_nodes,
+        num_edges: gs.num_edges,
+        avg_degree: gs.avg_degree,
+        is_transformed: gs.is_transformed,
+    });
+
+    let convergence_summary = payload.convergence_summary.map(|cs| PyConvergenceSummary {
+        iterations: cs.iterations,
+        converged: cs.converged,
+        final_delta: cs.final_delta,
+    });
+
+    let cluster_details = payload.cluster_details.map(|clusters| {
+        clusters
+            .into_iter()
+            .enumerate()
+            .map(|(i, members)| PyClusterDetail {
+                cluster_index: i,
+                members: members
+                    .into_iter()
+                    .map(|m| PyClusterMember {
+                        index: m.index,
+                        text: m.text,
+                        lemma: m.lemma,
+                    })
+                    .collect(),
+            })
+            .collect()
+    });
+
+    let phrase_diagnostics = payload.phrase_diagnostics.map(|events| {
+        events
+            .into_iter()
+            .map(|e| PyPhraseSplitEvent {
+                token_range: e.token_range,
+                text: e.text,
+                reason: format!("{:?}", e.reason),
+            })
+            .collect()
+    });
+
+    let dropped_candidates = payload.dropped_candidates.map(|drops| {
+        drops
+            .into_iter()
+            .map(|d| PyDroppedCandidate {
+                text: d.text,
+                lemma: d.lemma,
+                score: d.score,
+                token_range: d.token_range,
+                reason: format!("{:?}", d.reason),
+            })
+            .collect()
+    });
+
+    PyDebugPayload {
+        graph_stats,
+        convergence_summary,
+        node_scores: payload.node_scores,
+        stage_timings: payload.stage_timings,
+        residuals: payload.residuals,
+        cluster_memberships: payload.cluster_memberships,
+        cluster_details,
+        phrase_diagnostics,
+        dropped_candidates,
+    }
+}
+
+/// Convert an `ExtractionResult` into a `PyTextRankResult`.
+fn extraction_result_to_py(
+    result: crate::phrase::extraction::ExtractionResult,
+) -> PyTextRankResult {
+    PyTextRankResult {
+        phrases: result.phrases.into_iter().map(PyPhrase::from).collect(),
+        converged: result.converged,
+        iterations: result.iterations,
+        debug: result.debug.map(convert_debug_payload),
+    }
+}
+
+// ─── End debug classes ──────────────────────────────────────────────────
+
 /// Result of TextRank extraction
 #[pyclass(name = "TextRankResult")]
 #[derive(Clone)]
@@ -72,6 +445,8 @@ pub struct PyTextRankResult {
     pub converged: bool,
     #[pyo3(get)]
     pub iterations: usize,
+    #[pyo3(get)]
+    pub debug: Option<PyDebugPayload>,
 }
 
 #[pymethods]
@@ -167,7 +542,9 @@ impl PyTextRankConfig {
         stopwords=None,
         use_pos_in_nodes=true,
         phrase_grouping="scrubbed_text",
-        determinism="default"
+        determinism="default",
+        debug_level="none",
+        debug_top_k=50
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -186,6 +563,8 @@ impl PyTextRankConfig {
         use_pos_in_nodes: bool,
         phrase_grouping: &str,
         determinism: &str,
+        debug_level: &str,
+        debug_top_k: usize,
     ) -> PyResult<Self> {
         let aggregation = match score_aggregation.to_lowercase().as_str() {
             "sum" => ScoreAggregation::Sum,
@@ -225,6 +604,13 @@ impl PyTextRankConfig {
             }
         };
 
+        let dbg_level = DebugLevel::parse_str(debug_level).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Unknown debug_level: {}. Use 'none', 'stats', 'top_nodes', or 'full'",
+                debug_level
+            ))
+        })?;
+
         let config = TextRankConfig {
             damping,
             max_iterations,
@@ -241,8 +627,8 @@ impl PyTextRankConfig {
             use_pos_in_nodes,
             phrase_grouping: phrase_grouping.parse().unwrap_or(PhraseGrouping::Lemma),
             determinism: det_mode,
-            debug_level: crate::pipeline::artifacts::DebugLevel::None,
-            debug_top_k: crate::pipeline::artifacts::DebugLevel::DEFAULT_TOP_K,
+            debug_level: dbg_level,
+            debug_top_k,
             max_nodes: None,
             max_edges: None,
         };
@@ -324,11 +710,7 @@ impl PyBaseTextRank {
             })
         });
 
-        Ok(PyTextRankResult {
-            phrases: result.phrases.into_iter().map(PyPhrase::from).collect(),
-            converged: result.converged,
-            iterations: result.iterations,
-        })
+        Ok(extraction_result_to_py(result))
     }
 
     /// Get the number of threads in the dedicated pool, or None if using the global pool.
@@ -409,11 +791,7 @@ impl PyPositionRank {
             })
         });
 
-        Ok(PyTextRankResult {
-            phrases: result.phrases.into_iter().map(PyPhrase::from).collect(),
-            converged: result.converged,
-            iterations: result.iterations,
-        })
+        Ok(extraction_result_to_py(result))
     }
 
     #[getter]
@@ -519,11 +897,7 @@ impl PyBiasedTextRank {
             })
         });
 
-        Ok(PyTextRankResult {
-            phrases: result.phrases.into_iter().map(PyPhrase::from).collect(),
-            converged: result.converged,
-            iterations: result.iterations,
-        })
+        Ok(extraction_result_to_py(result))
     }
 
     #[getter]
@@ -605,11 +979,7 @@ impl PySingleRank {
             })
         });
 
-        Ok(PyTextRankResult {
-            phrases: result.phrases.into_iter().map(PyPhrase::from).collect(),
-            converged: result.converged,
-            iterations: result.iterations,
-        })
+        Ok(extraction_result_to_py(result))
     }
 
     #[getter]
@@ -717,11 +1087,7 @@ impl PyTopicalPageRank {
             })
         });
 
-        Ok(PyTextRankResult {
-            phrases: result.phrases.into_iter().map(PyPhrase::from).collect(),
-            converged: result.converged,
-            iterations: result.iterations,
-        })
+        Ok(extraction_result_to_py(result))
     }
 
     #[getter]
@@ -817,11 +1183,7 @@ impl PyMultipartiteRank {
             })
         });
 
-        Ok(PyTextRankResult {
-            phrases: result.phrases.into_iter().map(PyPhrase::from).collect(),
-            converged: result.converged,
-            iterations: result.iterations,
-        })
+        Ok(extraction_result_to_py(result))
     }
 
     #[getter]
@@ -920,6 +1282,7 @@ impl PySentenceRank {
             phrases: result.phrases.into_iter().map(PyPhrase::from).collect(),
             converged: result.converged,
             iterations: result.iterations as usize,
+            debug: result.debug.map(convert_debug_payload),
         })
     }
 

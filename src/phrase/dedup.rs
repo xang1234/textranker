@@ -3,6 +3,7 @@
 //! When multiple noun chunks overlap, we need to select the best ones.
 //! Strategy: sort by position, then by score descending, keep non-overlapping.
 
+use crate::pipeline::artifacts::DroppedCandidate;
 use crate::types::ChunkSpan;
 
 /// A chunk with an associated score
@@ -81,6 +82,51 @@ pub fn resolve_overlaps_greedy(mut chunks: Vec<ScoredChunk>) -> Vec<ScoredChunk>
     result.sort_by_key(|c| c.chunk.start_char);
 
     result
+}
+
+/// Greedy overlap resolution with diagnostics.
+///
+/// Returns the kept chunks **and** a record of every chunk that was dropped
+/// (with the reason: overlapped a higher-scored chunk).
+pub fn resolve_overlaps_greedy_with_diagnostics(
+    mut chunks: Vec<ScoredChunk>,
+) -> (Vec<ScoredChunk>, Vec<DroppedCandidate>) {
+    let mut dropped = Vec::new();
+    if chunks.is_empty() {
+        return (chunks, dropped);
+    }
+
+    // Sort by score descending
+    chunks.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+    let mut result = Vec::new();
+
+    for chunk in chunks {
+        // Find the first selected chunk that overlaps with this one
+        let blocking = result
+            .iter()
+            .find(|selected: &&ScoredChunk| chunk.chunk.overlaps(&selected.chunk));
+
+        if let Some(blocker) = blocking {
+            dropped.push(DroppedCandidate {
+                text: chunk.text.clone(),
+                lemma: chunk.lemma.clone(),
+                score: chunk.score,
+                token_range: (chunk.chunk.start_token, chunk.chunk.end_token),
+                reason: crate::pipeline::artifacts::DropReason::OverlapWithHigherScored {
+                    kept_text: blocker.text.clone(),
+                    kept_score: blocker.score,
+                },
+            });
+        } else {
+            result.push(chunk);
+        }
+    }
+
+    // Sort result by position for natural reading order
+    result.sort_by_key(|c| c.chunk.start_char);
+
+    (result, dropped)
 }
 
 /// Merge adjacent chunks that share the same lemma pattern
@@ -222,5 +268,85 @@ mod tests {
         // The first (higher-scoring) chunk should be kept
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].text, "higher score");
+    }
+
+    // ─── Diagnostics tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_greedy_diagnostics_records_overlap_drops() {
+        let chunks = vec![
+            make_chunk(0, 15, 2.0, "higher"),
+            make_chunk(5, 20, 1.0, "lower"),  // Overlaps, lower score → should be dropped
+            make_chunk(25, 35, 1.5, "no_overlap"), // No overlap → kept
+        ];
+
+        let (kept, dropped) = resolve_overlaps_greedy_with_diagnostics(chunks);
+
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().any(|c| c.text == "higher"));
+        assert!(kept.iter().any(|c| c.text == "no_overlap"));
+
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].text, "lower");
+        assert_eq!(dropped[0].score, 1.0);
+        match &dropped[0].reason {
+            crate::pipeline::artifacts::DropReason::OverlapWithHigherScored {
+                kept_text,
+                kept_score,
+            } => {
+                assert_eq!(kept_text, "higher");
+                assert_eq!(*kept_score, 2.0);
+            }
+            other => panic!("Expected OverlapWithHigherScored, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_greedy_diagnostics_no_overlap_produces_empty_drops() {
+        let chunks = vec![
+            make_chunk(0, 10, 1.0, "a"),
+            make_chunk(15, 25, 2.0, "b"),
+            make_chunk(30, 40, 1.5, "c"),
+        ];
+
+        let (kept, dropped) = resolve_overlaps_greedy_with_diagnostics(chunks);
+
+        assert_eq!(kept.len(), 3);
+        assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn test_greedy_diagnostics_empty_input() {
+        let (kept, dropped) = resolve_overlaps_greedy_with_diagnostics(vec![]);
+        assert!(kept.is_empty());
+        assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn test_greedy_diagnostics_multiple_drops() {
+        // "best" (score 3.0) overlaps with both "mid" (1.5) and "low" (0.5)
+        let chunks = vec![
+            make_chunk(0, 20, 3.0, "best"),
+            make_chunk(5, 15, 1.5, "mid"),
+            make_chunk(10, 25, 0.5, "low"),
+        ];
+
+        let (kept, dropped) = resolve_overlaps_greedy_with_diagnostics(chunks);
+
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].text, "best");
+
+        assert_eq!(dropped.len(), 2);
+        // Both should reference "best" as the blocker
+        for d in &dropped {
+            match &d.reason {
+                crate::pipeline::artifacts::DropReason::OverlapWithHigherScored {
+                    kept_text, ..
+                } => {
+                    assert_eq!(kept_text, "best");
+                }
+                other => panic!("Expected OverlapWithHigherScored, got {:?}", other),
+            }
+        }
     }
 }

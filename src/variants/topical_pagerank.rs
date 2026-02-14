@@ -91,6 +91,7 @@ impl TopicalPageRank {
                 phrases: Vec::new(),
                 converged: true,
                 iterations: 0,
+                debug: None,
             };
         }
 
@@ -116,10 +117,19 @@ impl TopicalPageRank {
         let extractor = PhraseExtractor::with_config(self.config.clone());
         let phrases = extractor.extract(tokens, &graph, &pagerank);
 
+        // Build debug payload from legacy types if requested.
+        let debug = crate::pipeline::artifacts::DebugPayload::build_from_legacy(
+            self.config.debug_level,
+            &graph,
+            &pagerank,
+            self.config.debug_top_k,
+        );
+
         ExtractionResult {
             phrases,
             converged: pagerank.converged,
             iterations: pagerank.iterations,
+            debug,
         }
     }
 

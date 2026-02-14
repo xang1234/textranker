@@ -96,6 +96,7 @@ impl TopicRank {
                 phrases: Vec::new(),
                 converged: true,
                 iterations: 0,
+                debug: None,
             };
         }
 
@@ -107,6 +108,7 @@ impl TopicRank {
                 phrases: Vec::new(),
                 converged: true,
                 iterations: 0,
+                debug: None,
             };
         }
 
@@ -140,10 +142,42 @@ impl TopicRank {
             phrases.truncate(self.config.top_n);
         }
 
+        // Build debug payload from legacy types if requested.
+        let mut debug = crate::pipeline::artifacts::DebugPayload::build_from_legacy(
+            self.config.debug_level,
+            &cluster_graph,
+            &pagerank,
+            self.config.debug_top_k,
+        );
+
+        // At Full level, enrich with cluster details.
+        if self.config.debug_level.includes_full() {
+            if let Some(ref mut dbg) = debug {
+                let details: Vec<Vec<crate::pipeline::artifacts::ClusterMember>> = cluster_members
+                    .iter()
+                    .map(|members| {
+                        members
+                            .iter()
+                            .map(|&idx| crate::pipeline::artifacts::ClusterMember {
+                                index: idx,
+                                text: candidates[idx].text.clone(),
+                                lemma: candidates[idx].lemma.clone(),
+                            })
+                            .collect()
+                    })
+                    .collect();
+                dbg.cluster_details = Some(details);
+
+                // Also populate cluster_memberships at Full level.
+                dbg.cluster_memberships = Some(cluster_members.clone());
+            }
+        }
+
         ExtractionResult {
             phrases,
             converged: pagerank.converged,
             iterations: pagerank.iterations,
+            debug,
         }
     }
 

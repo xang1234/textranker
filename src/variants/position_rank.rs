@@ -57,6 +57,7 @@ impl PositionRank {
             phrases: result.phrases,
             converged: result.converged,
             iterations: result.iterations as usize,
+            debug: result.debug,
         }
     }
 }

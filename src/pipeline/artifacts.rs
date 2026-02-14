@@ -1693,6 +1693,16 @@ pub struct DebugPayload {
     /// indices belonging to cluster `i`.  Only populated for topic-family
     /// pipelines (TopicRank, MultipartiteRank).
     pub cluster_memberships: Option<Vec<Vec<usize>>>,
+    /// Enriched cluster details with text/lemma for each member.
+    /// Additive alongside `cluster_memberships` — populated at Full level.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_details: Option<Vec<Vec<ClusterMember>>>,
+    /// Per-token phrase formation diagnostics (Full level only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phrase_diagnostics: Option<Vec<PhraseSplitEvent>>,
+    /// Candidates dropped by overlap resolution, zero-score, or top-N (Full level only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dropped_candidates: Option<Vec<DroppedCandidate>>,
 }
 
 /// Summary statistics for the co-occurrence graph.
@@ -1700,6 +1710,10 @@ pub struct DebugPayload {
 pub struct GraphStats {
     pub num_nodes: usize,
     pub num_edges: usize,
+    /// Average degree: `num_edges / num_nodes`.
+    /// CSR already double-counts undirected edges, so this reflects the
+    /// actual row-pointer degree sum.  Returns 0.0 for empty graphs.
+    pub avg_degree: f64,
     /// Whether the graph was modified by a [`GraphTransform`] stage.
     pub is_transformed: bool,
 }
@@ -1713,6 +1727,81 @@ pub struct ConvergenceSummary {
     pub converged: bool,
     /// Final L1-norm delta between last two iterations.
     pub final_delta: f64,
+}
+
+/// Records why a potential phrase was split or rejected during chunking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhraseSplitEvent {
+    /// Token range `[start, end)` in the original token array.
+    pub token_range: (usize, usize),
+    /// Surface text of the token(s) involved.
+    pub text: String,
+    /// Why the chunk was split or rejected.
+    pub reason: PhraseSplitReason,
+}
+
+/// Reason a phrase chunk was split or a token was rejected.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PhraseSplitReason {
+    /// A stopword caused a chunk boundary.
+    StopwordBoundary { stopword: String },
+    /// A token was filtered by POS tag (not in include_pos list).
+    PosFilter { token: String, pos: String },
+    /// The chunk exceeded the configured max length.
+    MaxLengthExceeded { length: usize, max: usize },
+    /// The token's POS tag did not match the noun phrase pattern.
+    PatternMismatch { token: String, pos: String },
+}
+
+/// Records a phrase candidate that was dropped during overlap dedup or filtering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DroppedCandidate {
+    /// Surface text of the dropped phrase.
+    pub text: String,
+    /// Lemmatized text.
+    pub lemma: String,
+    /// Score the phrase had before being dropped.
+    pub score: f64,
+    /// Token range `[start, end)`.
+    pub token_range: (usize, usize),
+    /// Why the candidate was dropped.
+    pub reason: DropReason,
+}
+
+/// Reason a scored candidate was dropped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DropReason {
+    /// Overlapped with a higher-scored phrase that was kept.
+    OverlapWithHigherScored {
+        kept_text: String,
+        kept_score: f64,
+    },
+    /// Score was zero (no graph nodes matched).
+    ZeroScore,
+    /// Fell below the top-N cutoff.
+    BelowTopN { top_n: usize },
+}
+
+/// Enriched cluster member with text metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterMember {
+    /// Candidate index in the original candidate list.
+    pub index: usize,
+    /// Surface text.
+    pub text: String,
+    /// Lemmatized text.
+    pub lemma: String,
+}
+
+/// Diagnostics collected during phrase extraction (Full debug level only).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExtractionDiagnostics {
+    /// Events from the chunking stage (stopword splits, POS rejections, etc.).
+    pub chunk_events: Vec<PhraseSplitEvent>,
+    /// Candidates dropped during overlap resolution, zero-score filter, or top-N.
+    pub dropped_candidates: Vec<DroppedCandidate>,
 }
 
 impl DebugPayload {
@@ -1741,9 +1830,12 @@ impl DebugPayload {
 
         // --- Stats level: graph stats + convergence summary ---
         if level.includes_stats() {
+            let nn = graph.num_nodes();
+            let ne = graph.num_edges();
             payload.graph_stats = Some(GraphStats {
-                num_nodes: graph.num_nodes(),
-                num_edges: graph.num_edges(),
+                num_nodes: nn,
+                num_edges: ne,
+                avg_degree: if nn > 0 { ne as f64 / nn as f64 } else { 0.0 },
                 is_transformed: graph.is_transformed(),
             });
 
@@ -1792,6 +1884,69 @@ impl DebugPayload {
 
         Some(payload)
     }
+
+    /// Build a [`DebugPayload`] from legacy types (`CsrGraph` + `PageRankResult`)
+    /// used by variants that bypass the modular pipeline (TopicRank,
+    /// MultipartiteRank, TopicalPageRank, base TextRank).
+    ///
+    /// Returns `None` when `level` is [`DebugLevel::None`].
+    ///
+    /// **Note:** `residuals` are unavailable via this path because
+    /// [`StandardPageRank`] and [`PersonalizedPageRank`] do not capture them.
+    pub fn build_from_legacy(
+        level: DebugLevel,
+        csr: &crate::graph::csr::CsrGraph,
+        pr: &crate::pagerank::PageRankResult,
+        max_top_k: usize,
+    ) -> Option<Self> {
+        if !level.is_enabled() {
+            return None;
+        }
+
+        let mut payload = DebugPayload::default();
+
+        // --- Stats level ---
+        if level.includes_stats() {
+            let nn = csr.num_nodes;
+            let ne = csr.col_idx.len();
+            payload.graph_stats = Some(GraphStats {
+                num_nodes: nn,
+                num_edges: ne,
+                avg_degree: if nn > 0 { ne as f64 / nn as f64 } else { 0.0 },
+                is_transformed: false,
+            });
+
+            payload.convergence_summary = Some(ConvergenceSummary {
+                iterations: pr.iterations as u32,
+                converged: pr.converged,
+                final_delta: pr.delta,
+            });
+        }
+
+        // --- TopNodes level ---
+        if level.includes_node_scores() {
+            let mut scored: Vec<(String, f64)> = csr
+                .lemmas
+                .iter()
+                .enumerate()
+                .map(|(i, lemma)| (lemma.clone(), pr.score(i as u32)))
+                .collect();
+
+            scored.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+
+            scored.truncate(max_top_k);
+            payload.node_scores = Some(scored);
+        }
+
+        // --- Full level ---
+        // Note: residuals unavailable via legacy PageRankResult path.
+
+        Some(payload)
+    }
 }
 
 impl FormattedResult {
@@ -1801,7 +1956,7 @@ impl FormattedResult {
             phrases: er.phrases.clone(),
             converged: er.converged,
             iterations: er.iterations as u32,
-            debug: None,
+            debug: er.debug.clone(),
             error: None,
         }
     }
@@ -2851,6 +3006,7 @@ mod tests {
             phrases: sample_phrases(),
             converged: false,
             iterations: 100,
+            debug: None,
         };
         let fr = FormattedResult::from_extraction(&er);
 
@@ -2867,18 +3023,199 @@ mod tests {
             graph_stats: Some(GraphStats {
                 num_nodes: 10,
                 num_edges: 25,
+                avg_degree: 25.0 / 10.0,
                 is_transformed: false,
             }),
             stage_timings: None,
             residuals: None,
             convergence_summary: None,
             cluster_memberships: None,
+            cluster_details: None,
+            phrase_diagnostics: None,
+            dropped_candidates: None,
         });
 
         let d = fr.debug.as_ref().unwrap();
         assert_eq!(d.node_scores.as_ref().unwrap().len(), 1);
         assert_eq!(d.graph_stats.as_ref().unwrap().num_nodes, 10);
         assert!(d.stage_timings.is_none());
+    }
+
+    // ================================================================
+    // Debug / Inspect mode tests
+    // ================================================================
+
+    #[test]
+    fn test_avg_degree_normal_graph() {
+        // 5 nodes, 10 edges → avg_degree = 2.0
+        let gs = GraphStats {
+            num_nodes: 5,
+            num_edges: 10,
+            avg_degree: 10.0 / 5.0,
+            is_transformed: false,
+        };
+        assert!((gs.avg_degree - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_avg_degree_empty_graph() {
+        let gs = GraphStats {
+            num_nodes: 0,
+            num_edges: 0,
+            avg_degree: 0.0,
+            is_transformed: false,
+        };
+        assert!((gs.avg_degree - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_avg_degree_single_node() {
+        let gs = GraphStats {
+            num_nodes: 1,
+            num_edges: 0,
+            avg_degree: 0.0 / 1.0,
+            is_transformed: false,
+        };
+        assert!((gs.avg_degree - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_build_from_legacy_none_level() {
+        use crate::graph::builder::GraphBuilder;
+        use crate::pagerank::standard::StandardPageRank;
+
+        let tokens = sample_tokens();
+        let builder = GraphBuilder::from_tokens_with_pos(
+            &tokens, 3, true, None, true,
+        );
+        let graph = crate::graph::csr::CsrGraph::from_builder(&builder);
+        let pr = StandardPageRank::new().run(&graph);
+
+        let payload = DebugPayload::build_from_legacy(
+            DebugLevel::None, &graph, &pr, 50,
+        );
+        assert!(payload.is_none());
+    }
+
+    #[test]
+    fn test_build_from_legacy_stats_level() {
+        use crate::graph::builder::GraphBuilder;
+        use crate::pagerank::standard::StandardPageRank;
+
+        let tokens = sample_tokens();
+        let builder = GraphBuilder::from_tokens_with_pos(
+            &tokens, 3, true, None, true,
+        );
+        let graph = crate::graph::csr::CsrGraph::from_builder(&builder);
+        let pr = StandardPageRank::new().run(&graph);
+
+        let payload = DebugPayload::build_from_legacy(
+            DebugLevel::Stats, &graph, &pr, 50,
+        ).unwrap();
+
+        assert!(payload.graph_stats.is_some());
+        let gs = payload.graph_stats.unwrap();
+        assert!(gs.num_nodes > 0);
+        assert!(gs.avg_degree >= 0.0);
+
+        assert!(payload.convergence_summary.is_some());
+        assert!(payload.node_scores.is_none()); // Stats doesn't include scores
+    }
+
+    #[test]
+    fn test_build_from_legacy_top_nodes_level() {
+        use crate::graph::builder::GraphBuilder;
+        use crate::pagerank::standard::StandardPageRank;
+
+        let tokens = sample_tokens();
+        let builder = GraphBuilder::from_tokens_with_pos(
+            &tokens, 3, true, None, true,
+        );
+        let graph = crate::graph::csr::CsrGraph::from_builder(&builder);
+        let pr = StandardPageRank::new().run(&graph);
+
+        let payload = DebugPayload::build_from_legacy(
+            DebugLevel::TopNodes, &graph, &pr, 50,
+        ).unwrap();
+
+        assert!(payload.graph_stats.is_some());
+        assert!(payload.convergence_summary.is_some());
+        assert!(payload.node_scores.is_some());
+        let scores = payload.node_scores.unwrap();
+        assert!(!scores.is_empty());
+        // Scores should be sorted descending
+        for w in scores.windows(2) {
+            assert!(w[0].1 >= w[1].1);
+        }
+    }
+
+    #[test]
+    fn test_build_from_legacy_full_level() {
+        use crate::graph::builder::GraphBuilder;
+        use crate::pagerank::standard::StandardPageRank;
+
+        let tokens = sample_tokens();
+        let builder = GraphBuilder::from_tokens_with_pos(
+            &tokens, 3, true, None, true,
+        );
+        let graph = crate::graph::csr::CsrGraph::from_builder(&builder);
+        let pr = StandardPageRank::new().run(&graph);
+
+        let payload = DebugPayload::build_from_legacy(
+            DebugLevel::Full, &graph, &pr, 50,
+        ).unwrap();
+
+        assert!(payload.graph_stats.is_some());
+        assert!(payload.convergence_summary.is_some());
+        assert!(payload.node_scores.is_some());
+        // Residuals unavailable via legacy path
+        assert!(payload.residuals.is_none());
+    }
+
+    #[test]
+    fn test_serde_roundtrip_phrase_split_event() {
+        let event = PhraseSplitEvent {
+            token_range: (0, 1),
+            text: "the".to_string(),
+            reason: PhraseSplitReason::StopwordBoundary {
+                stopword: "the".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let back: PhraseSplitEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.text, "the");
+        assert_eq!(back.token_range, (0, 1));
+    }
+
+    #[test]
+    fn test_serde_roundtrip_dropped_candidate() {
+        let dc = DroppedCandidate {
+            text: "machine learning".to_string(),
+            lemma: "machine learning".to_string(),
+            score: 0.5,
+            token_range: (0, 2),
+            reason: DropReason::OverlapWithHigherScored {
+                kept_text: "Machine learning algorithms".to_string(),
+                kept_score: 0.8,
+            },
+        };
+        let json = serde_json::to_string(&dc).unwrap();
+        let back: DroppedCandidate = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.text, "machine learning");
+        assert!((back.score - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_serde_roundtrip_cluster_member() {
+        let cm = ClusterMember {
+            index: 3,
+            text: "neural network".to_string(),
+            lemma: "neural network".to_string(),
+        };
+        let json = serde_json::to_string(&cm).unwrap();
+        let back: ClusterMember = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.index, 3);
+        assert_eq!(back.text, "neural network");
     }
 
     // ================================================================
