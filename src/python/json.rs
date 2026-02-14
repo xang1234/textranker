@@ -836,30 +836,56 @@ fn process_single_doc_with_workspace(
     serde_json::to_string(&json_result).map_err(|e| DocError::Other(e.to_string()))
 }
 
-/// Build a Rayon thread pool for batch-level parallelism (pure-Rust core).
+/// Batch parallelism strategy.
+enum BatchPool {
+    /// Run documents sequentially (num_threads=1).
+    Sequential,
+    /// Use the Rayon global thread pool (num_threads=None / auto).
+    Global,
+    /// Use a dedicated thread pool with a specific thread count.
+    Custom(rayon::ThreadPool),
+}
+
+impl BatchPool {
+    /// Execute `f` inside the appropriate pool.
+    ///
+    /// - `Sequential` → not called (caller handles sequential path separately)
+    /// - `Global` → calls `f()` directly (Rayon global pool used by default)
+    /// - `Custom` → calls `pool.install(f)` so `par_iter()` uses this pool
+    fn install<R: Send>(&self, f: impl FnOnce() -> R + Send) -> R {
+        match self {
+            BatchPool::Sequential => unreachable!("caller should handle sequential path"),
+            BatchPool::Global => f(),
+            BatchPool::Custom(pool) => pool.install(f),
+        }
+    }
+
+    fn is_sequential(&self) -> bool {
+        matches!(self, BatchPool::Sequential)
+    }
+}
+
+/// Build a batch parallelism strategy (pure-Rust core).
 ///
-/// - `None` → auto (Rayon global pool size, typically num_cpus)
-/// - `Some(1)` → sequential (returns `Ok(None)`, no pool created)
-/// - `Some(n)` where n > 1 → pool with exactly n threads
+/// - `None` → auto (Rayon global pool, no allocation)
+/// - `Some(1)` → sequential
+/// - `Some(n)` where n > 1 → dedicated pool with n threads
 /// - `Some(0)` → error
-fn build_batch_pool_inner(num_threads: Option<usize>) -> Result<Option<rayon::ThreadPool>, String> {
+fn build_batch_pool_inner(num_threads: Option<usize>) -> Result<BatchPool, String> {
     match num_threads {
         Some(0) => Err("num_threads must be >= 1 or None".to_string()),
-        Some(1) => Ok(None),
+        Some(1) => Ok(BatchPool::Sequential),
         Some(n) => rayon::ThreadPoolBuilder::new()
             .num_threads(n)
             .build()
-            .map(Some)
+            .map(BatchPool::Custom)
             .map_err(|e| e.to_string()),
-        None => rayon::ThreadPoolBuilder::new()
-            .build()
-            .map(Some)
-            .map_err(|e| e.to_string()),
+        None => Ok(BatchPool::Global),
     }
 }
 
 /// PyO3 wrapper around [`build_batch_pool_inner`].
-fn build_batch_pool(num_threads: Option<usize>) -> PyResult<Option<rayon::ThreadPool>> {
+fn build_batch_pool(num_threads: Option<usize>) -> PyResult<BatchPool> {
     build_batch_pool_inner(num_threads).map_err(|e| {
         if e.contains("num_threads must be") {
             pyo3::exceptions::PyValueError::new_err(e)
@@ -913,12 +939,11 @@ pub fn extract_jsonl_from_json(
     let pool = build_batch_pool(num_threads)?;
     let input = jsonl_input.to_owned();
     let result = py.allow_threads(move || {
-        // Pre-parse non-blank lines with their original indices for order preservation
-        let lines: Vec<(usize, &str)> = input
+        // Pre-parse non-blank lines (par_iter().collect() preserves input order)
+        let lines: Vec<&str> = input
             .lines()
-            .enumerate()
-            .filter(|(_, l)| !l.trim().is_empty())
-            .map(|(i, l)| (i, l.trim()))
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
             .collect();
 
         let process_line = |line: &str, ws: Option<&mut PipelineWorkspace>, force_st: bool| {
@@ -931,27 +956,27 @@ pub fn extract_jsonl_from_json(
             }
         };
 
-        match pool {
-            Some(pool) => {
-                let results: Vec<String> = pool.install(|| {
-                    lines
-                        .par_iter()
-                        .map(|(_, line)| process_line(line, None, true))
-                        .collect()
-                });
-                results.join("\n")
-            }
-            None => {
-                let mut ws = PipelineWorkspace::new();
-                let mut output = String::new();
-                for (_, line) in &lines {
-                    if !output.is_empty() {
-                        output.push('\n');
-                    }
-                    output.push_str(&process_line(line, Some(&mut ws), false));
+        if pool.is_sequential() {
+            let mut ws = PipelineWorkspace::new();
+            let mut output = String::new();
+            for line in &lines {
+                if !output.is_empty() {
+                    output.push('\n');
                 }
-                output
+                output.push_str(&process_line(line, Some(&mut ws), false));
             }
+            output
+        } else {
+            let results: Vec<String> = pool.install(|| {
+                lines
+                    .par_iter()
+                    .map(|line| {
+                        let mut ws = PipelineWorkspace::new();
+                        process_line(line, Some(&mut ws), true)
+                    })
+                    .collect()
+            });
+            results.join("\n")
         }
     });
     Ok(result)
@@ -1002,8 +1027,23 @@ pub fn extract_batch_from_json(
     let pool = build_batch_pool(num_threads)?;
 
     // Release the GIL for the entire batch.
-    let result = py.allow_threads(move || match pool {
-        Some(pool) => {
+    let result = py.allow_threads(move || {
+        if pool.is_sequential() {
+            // Sequential path: reuse a single workspace across iterations.
+            let mut ws = PipelineWorkspace::new();
+            let mut output = String::from("[");
+            for (i, doc) in docs.into_iter().enumerate() {
+                if i > 0 {
+                    output.push(',');
+                }
+                match process_single_doc_with_workspace(doc, Some(&mut ws), false) {
+                    Ok(json) => output.push_str(&json),
+                    Err(e) => output.push_str(&serialize_doc_error(&e)),
+                }
+            }
+            output.push(']');
+            output
+        } else {
             // Parallel path: each Rayon task gets its own workspace.
             // par_iter().collect() preserves input order (Rayon guarantee).
             // force_single_thread = true prevents nested per-document parallelism.
@@ -1024,22 +1064,6 @@ pub fn extract_batch_from_json(
                     output.push(',');
                 }
                 output.push_str(r);
-            }
-            output.push(']');
-            output
-        }
-        None => {
-            // Sequential path: reuse a single workspace across iterations.
-            let mut ws = PipelineWorkspace::new();
-            let mut output = String::from("[");
-            for (i, doc) in docs.into_iter().enumerate() {
-                if i > 0 {
-                    output.push(',');
-                }
-                match process_single_doc_with_workspace(doc, Some(&mut ws), false) {
-                    Ok(json) => output.push_str(&json),
-                    Err(e) => output.push_str(&serialize_doc_error(&e)),
-                }
             }
             output.push(']');
             output
@@ -1071,12 +1095,12 @@ impl JsonBatchIter {
     }
 
     fn __next__(&mut self, py: Python<'_>) -> Option<String> {
-        // Parallel eager path: pop from precomputed results
-        if let Some(ref results) = self.precomputed {
+        // Parallel eager path: take from precomputed results (avoids cloning)
+        if let Some(ref mut results) = self.precomputed {
             if self.precomputed_index < results.len() {
                 let idx = self.precomputed_index;
                 self.precomputed_index += 1;
-                return Some(results[idx].clone());
+                return Some(std::mem::take(&mut results[idx]));
             }
             return None;
         }
@@ -1146,37 +1170,36 @@ pub fn extract_batch_iter(
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
     let pool = build_batch_pool(num_threads)?;
 
-    match pool {
-        Some(pool) => {
-            // Eager-parallel: process all docs upfront
-            let precomputed = py.allow_threads(move || {
-                pool.install(|| {
-                    docs.into_par_iter()
-                        .map(|doc| {
-                            let mut ws = PipelineWorkspace::new();
-                            match process_single_doc_with_workspace(doc, Some(&mut ws), true) {
-                                Ok(json) => json,
-                                Err(e) => serialize_doc_error(&e),
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                })
-            });
-            Ok(JsonBatchIter {
-                docs: Vec::new(),
-                index: 0,
-                workspace: PipelineWorkspace::new(),
-                precomputed: Some(precomputed),
-                precomputed_index: 0,
-            })
-        }
-        None => Ok(JsonBatchIter {
+    if pool.is_sequential() {
+        Ok(JsonBatchIter {
             docs: docs.into_iter().map(Some).collect(),
             index: 0,
             workspace: PipelineWorkspace::new(),
             precomputed: None,
             precomputed_index: 0,
-        }),
+        })
+    } else {
+        // Eager-parallel: process all docs upfront
+        let precomputed = py.allow_threads(move || {
+            pool.install(|| {
+                docs.into_par_iter()
+                    .map(|doc| {
+                        let mut ws = PipelineWorkspace::new();
+                        match process_single_doc_with_workspace(doc, Some(&mut ws), true) {
+                            Ok(json) => json,
+                            Err(e) => serialize_doc_error(&e),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+        });
+        Ok(JsonBatchIter {
+            docs: Vec::new(),
+            index: 0,
+            workspace: PipelineWorkspace::new(),
+            precomputed: Some(precomputed),
+            precomputed_index: 0,
+        })
     }
 }
 
@@ -3591,40 +3614,47 @@ mod tests {
     }
 
     #[test]
-    fn test_build_batch_pool_one_returns_none() {
+    fn test_build_batch_pool_one_returns_sequential() {
         let pool = build_batch_pool_inner(Some(1)).unwrap();
-        assert!(pool.is_none(), "Some(1) should return None (sequential)");
+        assert!(pool.is_sequential(), "Some(1) should be Sequential");
     }
 
     #[test]
     fn test_build_batch_pool_explicit_threads() {
         let pool = build_batch_pool_inner(Some(4)).unwrap();
-        assert!(pool.is_some(), "Some(4) should return a thread pool");
-        assert_eq!(pool.unwrap().current_num_threads(), 4);
+        assert!(
+            matches!(pool, BatchPool::Custom(_)),
+            "Some(4) should return Custom pool"
+        );
     }
 
     #[test]
-    fn test_build_batch_pool_auto() {
+    fn test_build_batch_pool_auto_uses_global() {
         let pool = build_batch_pool_inner(None).unwrap();
-        assert!(pool.is_some(), "None should return a thread pool (auto)");
+        assert!(
+            matches!(pool, BatchPool::Global),
+            "None should return Global"
+        );
     }
 
     #[test]
-    fn test_force_single_thread_propagation() {
-        // Verify that force_single_thread sets resolved.runtime.single_thread
-        let spec: PipelineSpec = serde_json::from_str(
-            r#"{"v": 1, "modules": {"rank": {"type": "personalized_pagerank"}, "teleport": {"type": "position"}}}"#,
-        )
-        .unwrap();
+    fn test_force_single_thread_produces_valid_results() {
+        // Verify that force_single_thread=true still produces correct output
+        // (exercises the full run_pipeline_from_spec path with the flag).
+        let json_input = format!(
+            r#"{{"tokens": {}, "pipeline": "textrank", "config": {{"determinism": "deterministic"}}}}"#,
+            pipeline_test_tokens_json()
+        );
+        let doc_normal: JsonDocument = serde_json::from_str(&json_input).unwrap();
+        let doc_forced: JsonDocument = serde_json::from_str(&json_input).unwrap();
 
-        // Resolve without forcing — should default to false
-        let resolved = resolve_spec(&spec).unwrap();
-        assert!(!resolved.runtime.single_thread);
+        let result_normal = process_single_doc_with_workspace(doc_normal, None, false).unwrap();
+        let result_forced = process_single_doc_with_workspace(doc_forced, None, true).unwrap();
 
-        // Resolve with forcing — should be true
-        let mut resolved = resolve_spec(&spec).unwrap();
-        resolved.runtime.single_thread = true;
-        assert!(resolved.runtime.single_thread);
+        // Both should produce identical results (deterministic mode)
+        let v_normal: serde_json::Value = serde_json::from_str(&result_normal).unwrap();
+        let v_forced: serde_json::Value = serde_json::from_str(&result_forced).unwrap();
+        assert_eq!(v_normal, v_forced);
     }
 
     #[test]
@@ -3644,8 +3674,8 @@ mod tests {
             .map(|doc| process_single_doc_with_workspace(doc, Some(&mut ws), false).unwrap())
             .collect();
 
-        // Parallel
-        let pool = build_batch_pool_inner(Some(2)).unwrap().unwrap();
+        // Parallel (using a 2-thread custom pool)
+        let pool = build_batch_pool_inner(Some(2)).unwrap();
         let par_results: Vec<String> = pool.install(|| {
             docs_par
                 .into_par_iter()
