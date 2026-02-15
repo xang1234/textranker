@@ -1774,10 +1774,7 @@ pub struct DroppedCandidate {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DropReason {
     /// Overlapped with a higher-scored phrase that was kept.
-    OverlapWithHigherScored {
-        kept_text: String,
-        kept_score: f64,
-    },
+    OverlapWithHigherScored { kept_text: String, kept_score: f64 },
     /// Score was zero (no graph nodes matched).
     ZeroScore,
     /// Fell below the top-N cutoff.
@@ -3085,15 +3082,11 @@ mod tests {
         use crate::pagerank::standard::StandardPageRank;
 
         let tokens = sample_tokens();
-        let builder = GraphBuilder::from_tokens_with_pos(
-            &tokens, 3, true, None, true,
-        );
+        let builder = GraphBuilder::from_tokens_with_pos(&tokens, 3, true, None, true);
         let graph = crate::graph::csr::CsrGraph::from_builder(&builder);
         let pr = StandardPageRank::new().run(&graph);
 
-        let payload = DebugPayload::build_from_legacy(
-            DebugLevel::None, &graph, &pr, 50,
-        );
+        let payload = DebugPayload::build_from_legacy(DebugLevel::None, &graph, &pr, 50);
         assert!(payload.is_none());
     }
 
@@ -3103,15 +3096,11 @@ mod tests {
         use crate::pagerank::standard::StandardPageRank;
 
         let tokens = sample_tokens();
-        let builder = GraphBuilder::from_tokens_with_pos(
-            &tokens, 3, true, None, true,
-        );
+        let builder = GraphBuilder::from_tokens_with_pos(&tokens, 3, true, None, true);
         let graph = crate::graph::csr::CsrGraph::from_builder(&builder);
         let pr = StandardPageRank::new().run(&graph);
 
-        let payload = DebugPayload::build_from_legacy(
-            DebugLevel::Stats, &graph, &pr, 50,
-        ).unwrap();
+        let payload = DebugPayload::build_from_legacy(DebugLevel::Stats, &graph, &pr, 50).unwrap();
 
         assert!(payload.graph_stats.is_some());
         let gs = payload.graph_stats.unwrap();
@@ -3128,15 +3117,12 @@ mod tests {
         use crate::pagerank::standard::StandardPageRank;
 
         let tokens = sample_tokens();
-        let builder = GraphBuilder::from_tokens_with_pos(
-            &tokens, 3, true, None, true,
-        );
+        let builder = GraphBuilder::from_tokens_with_pos(&tokens, 3, true, None, true);
         let graph = crate::graph::csr::CsrGraph::from_builder(&builder);
         let pr = StandardPageRank::new().run(&graph);
 
-        let payload = DebugPayload::build_from_legacy(
-            DebugLevel::TopNodes, &graph, &pr, 50,
-        ).unwrap();
+        let payload =
+            DebugPayload::build_from_legacy(DebugLevel::TopNodes, &graph, &pr, 50).unwrap();
 
         assert!(payload.graph_stats.is_some());
         assert!(payload.convergence_summary.is_some());
@@ -3155,15 +3141,11 @@ mod tests {
         use crate::pagerank::standard::StandardPageRank;
 
         let tokens = sample_tokens();
-        let builder = GraphBuilder::from_tokens_with_pos(
-            &tokens, 3, true, None, true,
-        );
+        let builder = GraphBuilder::from_tokens_with_pos(&tokens, 3, true, None, true);
         let graph = crate::graph::csr::CsrGraph::from_builder(&builder);
         let pr = StandardPageRank::new().run(&graph);
 
-        let payload = DebugPayload::build_from_legacy(
-            DebugLevel::Full, &graph, &pr, 50,
-        ).unwrap();
+        let payload = DebugPayload::build_from_legacy(DebugLevel::Full, &graph, &pr, 50).unwrap();
 
         assert!(payload.graph_stats.is_some());
         assert!(payload.convergence_summary.is_some());

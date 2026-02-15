@@ -337,6 +337,7 @@ fn benchmark_pipeline_vs_direct(c: &mut Criterion) {
                     phrases: Vec::new(),
                     converged: true,
                     iterations: 0,
+                    debug: None,
                 };
             }
             let graph = graph::csr::CsrGraph::from_builder(&builder);
@@ -351,6 +352,7 @@ fn benchmark_pipeline_vs_direct(c: &mut Criterion) {
                 phrases,
                 converged: pagerank.converged,
                 iterations: pagerank.iterations,
+                debug: None,
             }
         })
     });

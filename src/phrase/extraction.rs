@@ -4,7 +4,9 @@
 //! and selects the most common surface form as canonical.
 
 use super::chunker::{chunk_lemma, chunk_text, NounChunker};
-use super::dedup::{resolve_overlaps_greedy, resolve_overlaps_greedy_with_diagnostics, ScoredChunk};
+use super::dedup::{
+    resolve_overlaps_greedy, resolve_overlaps_greedy_with_diagnostics, ScoredChunk,
+};
 use crate::graph::csr::CsrGraph;
 use crate::pagerank::PageRankResult;
 use crate::pipeline::artifacts::{DroppedCandidate, ExtractionDiagnostics};
@@ -142,8 +144,7 @@ impl PhraseExtractor {
             .collect();
 
         // Resolve overlaps with diagnostics
-        let (deduped, overlap_drops) =
-            resolve_overlaps_greedy_with_diagnostics(scored_chunks);
+        let (deduped, overlap_drops) = resolve_overlaps_greedy_with_diagnostics(scored_chunks);
         dropped_candidates.extend(overlap_drops);
 
         // Group variants and create phrases with canonical forms
@@ -168,11 +169,7 @@ impl PhraseExtractor {
                     text: phrase.text,
                     lemma: phrase.lemma,
                     score: phrase.score,
-                    token_range: phrase
-                        .offsets
-                        .first()
-                        .copied()
-                        .unwrap_or((0, 0)),
+                    token_range: phrase.offsets.first().copied().unwrap_or((0, 0)),
                     reason: crate::pipeline::artifacts::DropReason::BelowTopN {
                         top_n: self.config.top_n,
                     },
@@ -781,16 +778,25 @@ mod tests {
             ..TextRankConfig::default()
         };
         let result = extract_keyphrases_with_info(&tokens, &config);
-        let dbg = result.debug.as_ref().expect("debug payload should be Some at Stats level");
+        let dbg = result
+            .debug
+            .as_ref()
+            .expect("debug payload should be Some at Stats level");
 
         // Graph stats present
-        let gs = dbg.graph_stats.as_ref().expect("graph_stats should be present");
+        let gs = dbg
+            .graph_stats
+            .as_ref()
+            .expect("graph_stats should be present");
         assert!(gs.num_nodes > 0);
         assert!(gs.num_edges > 0);
         assert!(gs.avg_degree > 0.0);
 
         // Convergence summary present
-        let cs = dbg.convergence_summary.as_ref().expect("convergence_summary should be present");
+        let cs = dbg
+            .convergence_summary
+            .as_ref()
+            .expect("convergence_summary should be present");
         assert!(cs.converged);
         assert!(cs.iterations > 0);
 
@@ -808,16 +814,25 @@ mod tests {
             ..TextRankConfig::default()
         };
         let result = extract_keyphrases_with_info(&tokens, &config);
-        let dbg = result.debug.as_ref().expect("debug payload should be Some at Full level");
+        let dbg = result
+            .debug
+            .as_ref()
+            .expect("debug payload should be Some at Full level");
 
         // Graph stats and convergence are present (inherited from lower levels)
         assert!(dbg.graph_stats.is_some());
         assert!(dbg.convergence_summary.is_some());
 
         // Full-level specific: phrase diagnostics
-        let pd = dbg.phrase_diagnostics.as_ref().expect("phrase_diagnostics should be present at Full level");
+        let pd = dbg
+            .phrase_diagnostics
+            .as_ref()
+            .expect("phrase_diagnostics should be present at Full level");
         // The sentence has non-noun tokens (verb, determiner, preposition) that should generate events
-        assert!(!pd.is_empty(), "Should have at least one phrase split event");
+        assert!(
+            !pd.is_empty(),
+            "Should have at least one phrase split event"
+        );
 
         // Full-level specific: dropped candidates (may or may not have entries depending on extraction)
         assert!(dbg.dropped_candidates.is_some());

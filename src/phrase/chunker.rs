@@ -104,7 +104,11 @@ impl NounChunker {
 
         // Extract chunks from each sentence
         for sent_tokens in sentences {
-            self.extract_chunks_from_sentence(&sent_tokens, &mut chunks, diagnostics.as_deref_mut());
+            self.extract_chunks_from_sentence(
+                &sent_tokens,
+                &mut chunks,
+                diagnostics.as_deref_mut(),
+            );
         }
 
         chunks
@@ -157,10 +161,11 @@ impl NounChunker {
                         d.push(PhraseSplitEvent {
                             token_range: (span.start_token, span.end_token),
                             text: chunk_text,
-                            reason: crate::pipeline::artifacts::PhraseSplitReason::MinLengthNotMet {
-                                length: len,
-                                min: self.config.min_length,
-                            },
+                            reason:
+                                crate::pipeline::artifacts::PhraseSplitReason::MinLengthNotMet {
+                                    length: len,
+                                    min: self.config.min_length,
+                                },
                         });
                     }
                 }
@@ -176,10 +181,11 @@ impl NounChunker {
                         d.push(PhraseSplitEvent {
                             token_range: (span.start_token, span.end_token),
                             text: chunk_text,
-                            reason: crate::pipeline::artifacts::PhraseSplitReason::MaxLengthExceeded {
-                                length: len,
-                                max: self.config.max_length,
-                            },
+                            reason:
+                                crate::pipeline::artifacts::PhraseSplitReason::MaxLengthExceeded {
+                                    length: len,
+                                    max: self.config.max_length,
+                                },
                         });
                     }
                 }
@@ -468,9 +474,7 @@ mod tests {
 
     #[test]
     fn test_extract_chunks_into_records_min_length_not_met() {
-        let tokens = vec![
-            Token::new("machine", "machine", PosTag::Noun, 0, 7, 0, 0),
-        ];
+        let tokens = vec![Token::new("machine", "machine", PosTag::Noun, 0, 7, 0, 0)];
 
         // min_length=2 means a single-noun phrase (len 1) is too short
         let chunker = NounChunker::new().with_min_length(2);

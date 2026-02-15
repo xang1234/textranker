@@ -276,7 +276,7 @@ mod tests {
     fn test_greedy_diagnostics_records_overlap_drops() {
         let chunks = vec![
             make_chunk(0, 15, 2.0, "higher"),
-            make_chunk(5, 20, 1.0, "lower"),  // Overlaps, lower score → should be dropped
+            make_chunk(5, 20, 1.0, "lower"), // Overlaps, lower score → should be dropped
             make_chunk(25, 35, 1.5, "no_overlap"), // No overlap → kept
         ];
 
@@ -341,7 +341,8 @@ mod tests {
         for d in &dropped {
             match &d.reason {
                 crate::pipeline::artifacts::DropReason::OverlapWithHigherScored {
-                    kept_text, ..
+                    kept_text,
+                    ..
                 } => {
                     assert_eq!(kept_text, "best");
                 }
