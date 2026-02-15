@@ -40,6 +40,20 @@ For complete test coverage across all features:
 PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 cargo test --lib --all-features
 ```
 
+### Pre-commit CI checks
+
+CI runs these checks on every push. Run them locally before committing:
+
+1. **Formatting** — `cargo fmt --all -- --check`. Always run `cargo fmt --all` after modifying Rust files.
+2. **Benchmark compilation** — `cargo check --benches`. The `--lib` test flag skips benchmarks, so adding/changing struct fields can silently break `benches/benchmark.rs`. Always check it compiles.
+3. **Exports manifest** — every public PyO3 class/function registered in `src/python/mod.rs` must also appear in `exports.toml` **and** `python/rapid_textrank/__init__.py` (both import and `__all__`). CI runs a bidirectional check (`test_all_rust_symbols_match_manifest`).
+
+Quick local validation:
+
+```bash
+PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 cargo fmt --all && cargo check --benches && cargo test --lib
+```
+
 ### Python wheel build
 
 ```bash
